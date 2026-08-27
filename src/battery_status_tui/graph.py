@@ -31,7 +31,6 @@ GRAPH_OFFSET = 6
 BLOCKS = " ▁▂▃▄▅▆▇█"
 BRAILLE_LEFT = ("⠁", "⠂", "⠄", "⡀")
 BRAILLE_RIGHT = ("⠈", "⠐", "⠠", "⢀")
-PHASE_BLOCKS = "▏▎▍▌▋▊▉"
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -172,19 +171,11 @@ def axis_rows(now: int) -> tuple[str, str]:
         axis[position] = "┬"
         label = f"{(hour + offset) % 24:02d}"
         _put(labels, min(position, GRAPH_WIDTH - len(label)), label)
-    elapsed = now % COLUMN_SECONDS
-    phase_index = min(len(PHASE_BLOCKS) - 1, elapsed * len(PHASE_BLOCKS) // COLUMN_SECONDS)
-    axis[NOW_INDEX - 1] = PHASE_BLOCKS[phase_index]
     return "".join(axis), "".join(labels).rstrip()
 
 
 def _style_sleep(row: str) -> str:
     return re.sub(r"([⣀z]+)", rf"{MUTED}{DIM}\1{RESET}", row)
-
-
-def _style_phase(axis: str) -> str:
-    position = NOW_INDEX - 1
-    return f"{axis[:position]}{MUTED}{DIM}{axis[position]}{RESET}{axis[position + 1:]}"
 
 
 def title_line(current: Measurement) -> str:
@@ -223,7 +214,7 @@ def render_dashboard(
             title_line(current),
             " " * GRAPH_OFFSET + _style_sleep(top),
             f"{MUTED}{left_label}{RESET}{_style_sleep(bottom)} {DIM}{right_label}{RESET}",
-            " " * GRAPH_OFFSET + _style_phase(axis),
+            " " * GRAPH_OFFSET + axis,
             " " * GRAPH_OFFSET + labels,
         )
     )

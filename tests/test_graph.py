@@ -109,26 +109,6 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(axis_rows(stamp(21, 0)), axis_rows(stamp(21, 20)))
         self.assertEqual(axis_rows(stamp(21, 20)), axis_rows(stamp(21, 40)))
 
-    def test_axis_phase_uses_all_partial_blocks(self):
-        expected = {
-            (22, 20): "▏", (22, 25): "▎", (22, 30): "▌",
-            (22, 35): "▊", (22, 39): "▉", (22, 40): "▏",
-        }
-        for (hour, minute), glyph in expected.items():
-            with self.subTest(hour=hour, minute=minute):
-                axis, _ = axis_rows(stamp(hour, minute))
-                self.assertEqual(axis[NOW_INDEX - 1], glyph)
-                self.assertEqual(axis[NOW_INDEX], "┬")
-                self.assertEqual(len(axis), GRAPH_WIDTH)
-        observed = "".join(axis_rows(stamp(22, minute))[0][NOW_INDEX - 1]
-                           for minute in (20, 23, 26, 29, 32, 35, 38))
-        self.assertEqual(observed, "▏▎▍▌▋▊▉")
-
-    def test_axis_phase_resets_at_every_twenty_minute_boundary(self):
-        for hour, minute in ((22, 0), (22, 20), (22, 40), (23, 0)):
-            with self.subTest(hour=hour, minute=minute):
-                self.assertEqual(axis_rows(stamp(hour, minute))[0][NOW_INDEX - 1], "▏")
-
     def test_hour_boundary_is_one_column_not_an_hour_jump(self):
         fixed = stamp(20)
         self.assertEqual(project_column(fixed, stamp(20, 59)) - project_column(fixed, stamp(21)), 1)
@@ -202,17 +182,6 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(lines[2][GRAPH_OFFSET + GRAPH_WIDTH], " ")
         self.assertEqual(lines[2][eta_start:], "2h00 ~23:00")
         self.assertEqual(max(len(line) for line in lines), 55)
-
-    def test_phase_indicator_does_not_modify_history_or_forecast_rows(self):
-        now = stamp(22, 35)
-        current = sample(now)
-        estimate = Estimate(3600, "test")
-        expected_top, expected_bottom = chart_rows(current, self.history, estimate, now)
-        rendered = plain(render_dashboard(current, self.history, None, estimate, now)).splitlines()
-        self.assertEqual(rendered[1][GRAPH_OFFSET:GRAPH_OFFSET + GRAPH_WIDTH], expected_top)
-        self.assertEqual(rendered[2][GRAPH_OFFSET:GRAPH_OFFSET + GRAPH_WIDTH], expected_bottom)
-        self.assertEqual(rendered[3][GRAPH_OFFSET + NOW_INDEX - 1], "▊")
-        self.assertEqual(rendered[3][GRAPH_OFFSET + NOW_INDEX], "┬")
 
     def test_approximate_power_has_tilde(self):
         current = Measurement(self.now, 48, "discharging", False, power_w=7.2, power_approximate=True)
