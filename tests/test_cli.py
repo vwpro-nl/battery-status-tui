@@ -4,12 +4,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from battery_status_tui.cli import current_estimate, diagnostic_text, parser
+from battery_status_tui.cli import current_estimate, diagnostic_text, next_refresh_delay, parser
 from battery_status_tui.models import Measurement
 from battery_status_tui.storage import Storage
 
 
 class CliTests(unittest.TestCase):
+    def test_live_refresh_wakes_at_next_projection_boundary(self):
+        self.assertAlmostEqual(next_refresh_delay(60, 1200 - 2), 2.05)
+        self.assertEqual(next_refresh_delay(60, 1200 + 2), 60)
+
     def test_once_and_sample_are_mutually_exclusive(self):
         with self.assertRaises(SystemExit):
             parser().parse_args(["--once", "--sample"])
@@ -38,4 +42,3 @@ class CliTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

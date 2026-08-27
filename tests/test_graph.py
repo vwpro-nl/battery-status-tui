@@ -53,6 +53,17 @@ class GraphTests(unittest.TestCase):
             with self.subTest(hour=hour, minute=minute):
                 self.assertEqual(project_column(fixed, stamp(hour, minute)), column)
 
+    def test_visible_history_moves_at_each_live_projection_boundary(self):
+        history = [sample(stamp(20), 80)]
+        expected = {(22, 19): 12, (22, 20): 11, (22, 39): 11, (22, 40): 10}
+        for (hour, minute), occupied_column in expected.items():
+            with self.subTest(hour=hour, minute=minute):
+                now = stamp(hour, minute)
+                top, bottom = chart_rows(sample(now), history, None, now)
+                occupied = [index for index in range(NOW_INDEX)
+                            if top[index] != " " or bottom[index] != " "]
+                self.assertEqual(occupied, [occupied_column])
+
     def test_column_inverse_uses_same_projection(self):
         now = stamp(20, 19)
         for column in range(GRAPH_WIDTH):

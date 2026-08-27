@@ -10,7 +10,7 @@ from pathlib import Path
 
 from . import __version__
 from .estimate import estimate_remaining, smooth_seconds
-from .graph import CSI, RESET, render_dashboard
+from .graph import COLUMN_SECONDS, CSI, RESET, render_dashboard
 from .models import Estimate, Measurement
 from .models import SleepInterval
 from .sources import BatterySource, SourceUnavailable, aggregate
@@ -23,6 +23,11 @@ BRAILLE: ⠀ ⠁ ⠂ ⠄ ⡀ ⢀ ⠒ ⠤ ⠦ ⠴
 JOIN   : ███▇▆▅│⠴⠦⠤⠒⠂⠁
 HEIGHT : ⠀ ⡀ ⣀ ⣄ ⣤ ⣦ ⣶ ⣿
 AXIS   : ┬─────┬─────┬─────┬─────┬"""
+
+def next_refresh_delay(interval: float, wall_now: float) -> float:
+    """Wake no later than the next wall-clock projection boundary."""
+    next_projection = (int(wall_now) // COLUMN_SECONDS + 1) * COLUMN_SECONDS
+    return min(max(1.0, interval), max(0.05, next_projection - wall_now + 0.05))
 
 def reconcile_journal(storage: Storage, now: int) -> None:
     checked = storage.metadata_int("journal-checked-at")
@@ -69,13 +74,14 @@ def current_estimate(storage: Storage, current: Measurement, now: int) -> Estima
 
 
 def render_once(source: BatterySource, storage: Storage, now: int | None = None) -> str:
-    timestamp = int(time.time()) if now is None else now
-    current = collect(source, storage, timestamp)
+    sample_timestamp = int(time.time()) if now is None else now
+    current = collect(source, storage, sample_timestamp)
+    render_timestamp = int(time.time()) if now is None else now
     session = storage.current_session()
-    history = storage.samples_since(timestamp - 6 * 3600)
-    estimate = current_estimate(storage, current, timestamp)
-    sleeps = storage.sleep_intervals_since(timestamp - 6 * 3600)
-    return render_dashboard(current, history, session, estimate, timestamp, sleeps)
+    history = storage.samples_since(render_timestamp - 6 * 3600)
+    estimate = current_estimate(storage, current, sample_timestamp)
+    sleeps = storage.sleep_intervals_since(render_timestamp - 6 * 3600)
+    return render_dashboard(current, history, session, estimate, render_timestamp, sleeps)
 
 
 def diagnostic_text(measurement: Measurement, storage: Storage) -> str:
@@ -187,7 +193,7 @@ def main(argv: list[str] | None = None) -> int:
                 output = f"battery-status-tui: {error}"
             sys.stdout.write(CSI + "2J" + CSI + "H" + output + "\n")
             sys.stdout.flush()
-            deadline = time.monotonic() + max(1.0, args.interval)
+            deadline = time.monotonic() + next_refresh_delay(args.interval, time.time())
             while running and time.monotonic() < deadline:
                 monitor.wakeup.wait(min(0.2, deadline - time.monotonic()))
                 resumed = False
