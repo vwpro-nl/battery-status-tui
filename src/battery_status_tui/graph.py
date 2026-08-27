@@ -27,6 +27,7 @@ GRAPH_WIDTH = TIME_COLUMNS + 1
 NOW_INDEX = TIME_COLUMNS // 2
 HISTORY_SECONDS = 6 * 3600
 FORECAST_SECONDS = 6 * 3600
+TICK_SECONDS = 3 * 3600
 GRAPH_OFFSET = 6
 BLOCKS = " ▁▂▃▄▅▆▇█"
 BRAILLE_LEFT = ("⠁", "⠂", "⠄", "⡀")
@@ -166,11 +167,16 @@ def format_duration(seconds: int | None) -> str:
 def axis_rows(now: int) -> tuple[str, str]:
     axis = ["─"] * GRAPH_WIDTH
     labels = [" "] * GRAPH_WIDTH
-    hour = dt.datetime.fromtimestamp(now).astimezone().hour
-    for position, offset in zip((0, 9, 18, 27, 36), (-6, -3, 0, 3, 6)):
-        axis[position] = "┬"
-        label = f"{(hour + offset) % 24:02d}"
-        _put(labels, min(position, GRAPH_WIDTH - len(label)), label)
+    first_visible = column_timestamp(-1, now)
+    last_visible = column_timestamp(GRAPH_WIDTH, now)
+    timestamp = first_visible // TICK_SECONDS * TICK_SECONDS
+    while timestamp <= last_visible:
+        position = project_column(timestamp, now)
+        if 0 <= position < GRAPH_WIDTH:
+            axis[position] = "┬"
+        label = dt.datetime.fromtimestamp(timestamp).astimezone().strftime("%H")
+        _put(labels, position, label)
+        timestamp += TICK_SECONDS
     return "".join(axis), "".join(labels).rstrip()
 
 

@@ -92,22 +92,42 @@ class GraphTests(unittest.TestCase):
         for column in range(GRAPH_WIDTH):
             self.assertEqual(project_column(column_timestamp(column, now), now), column)
 
-    def test_axis_labels_advance_only_on_each_full_hour(self):
+    def test_axis_ticks_and_labels_follow_the_twenty_minute_projection(self):
+        midnight = stamp(23) + 3600
         expected = {
-            (21, 59): ["15", "18", "21", "00", "03"],
-            (22, 0): ["16", "19", "22", "01", "04"],
-            (23, 0): ["17", "20", "23", "02", "05"],
+            stamp(23): ([0, 9, 18, 27, 36], "17       20       23       02       0"),
+            stamp(23, 20): ([8, 17, 26, 35], "7       20       23       02       05"),
+            stamp(23, 40): ([7, 16, 25, 34], "       20       23       02       05"),
+            midnight: ([6, 15, 24, 33], "      20       23       02       05"),
         }
-        for (hour, minute), labels in expected.items():
-            with self.subTest(hour=hour, minute=minute):
-                axis, rendered = axis_rows(stamp(hour, minute))
-                self.assertEqual(re.findall(r"\d{2}", rendered), labels)
-                self.assertEqual([index for index, character in enumerate(axis) if character == "┬"],
-                                 [0, 9, 18, 27, 36])
+        for now, (ticks, labels) in expected.items():
+            with self.subTest(now=now):
+                axis, rendered = axis_rows(now)
+                self.assertEqual([index for index, character in enumerate(axis) if character == "┬"], ticks)
+                self.assertEqual(rendered, labels)
 
-    def test_axis_labels_do_not_follow_twenty_minute_data_shifts(self):
-        self.assertEqual(axis_rows(stamp(21, 0)), axis_rows(stamp(21, 20)))
-        self.assertEqual(axis_rows(stamp(21, 20)), axis_rows(stamp(21, 40)))
+    def test_axis_clips_labels_and_admits_new_right_label(self):
+        self.assertNotIn("05", axis_rows(stamp(22, 40))[1])
+        self.assertTrue(axis_rows(stamp(23))[1].endswith("0"))
+        self.assertTrue(axis_rows(stamp(23, 20))[1].endswith("05"))
+        self.assertTrue(axis_rows(stamp(23, 20))[1].startswith("7"))
+        self.assertFalse(axis_rows(stamp(23, 40))[1].startswith("17"))
+
+    def test_absolute_tick_and_graph_data_use_same_projection(self):
+        fixed = stamp(23)
+        for now in (stamp(23), stamp(23, 20), stamp(23, 40), stamp(23) + 3600):
+            with self.subTest(now=now):
+                position = project_column(fixed, now)
+                axis, _ = axis_rows(now)
+                self.assertEqual(axis[position], "┬")
+                top, bottom = chart_rows(sample(now), [sample(fixed)], None, now)
+                if now > fixed:
+                    self.assertNotEqual((top[position], bottom[position]), (" ", " "))
+
+    def test_now_marker_stays_fixed_while_axis_moves(self):
+        for now in (stamp(23), stamp(23, 20), stamp(23, 40), stamp(23) + 3600):
+            top, bottom = chart_rows(sample(now), [], None, now)
+            self.assertEqual((top[NOW_INDEX], bottom[NOW_INDEX]), ("│", "│"))
 
     def test_hour_boundary_is_one_column_not_an_hour_jump(self):
         fixed = stamp(20)
