@@ -27,7 +27,7 @@ GRAPH_WIDTH = TIME_COLUMNS + 1
 NOW_INDEX = TIME_COLUMNS // 2
 HISTORY_SECONDS = 6 * 3600
 FORECAST_SECONDS = 6 * 3600
-TICK_SECONDS = 3 * 3600
+TICK_SECONDS = 3600
 GRAPH_OFFSET = 6
 BLOCKS = " ▁▂▃▄▅▆▇█"
 BRAILLE_LEFT = ("⠁", "⠂", "⠄", "⡀")
@@ -170,27 +170,14 @@ def axis_rows(now: int) -> tuple[str, str]:
     first_visible = column_timestamp(-1, now)
     last_visible = column_timestamp(GRAPH_WIDTH, now)
     timestamp = first_visible // TICK_SECONDS * TICK_SECONDS
-    normal_marks: list[tuple[int, int]] = []
     while timestamp <= last_visible:
         position = project_column(timestamp, now)
-        normal_marks.append((timestamp, position))
         if 0 <= position < GRAPH_WIDTH:
             axis[position] = "┬"
         label = dt.datetime.fromtimestamp(timestamp).astimezone().strftime("%H")
         if 0 <= position and position + len(label) <= GRAPH_WIDTH:
             _put(labels, position, label)
         timestamp += TICK_SECONDS
-    left_mark = max((mark for mark in normal_marks if mark[1] <= 0), default=None)
-    if left_mark is not None and not (0 <= left_mark[1] and left_mark[1] + 2 <= GRAPH_WIDTH):
-        boundary = dt.datetime.fromtimestamp(column_timestamp(0, now)).astimezone()
-        candidate = boundary.replace(minute=0, second=0, microsecond=0)
-        if candidate < boundary:
-            candidate += dt.timedelta(hours=1)
-        candidate_timestamp = int(candidate.timestamp())
-        position = project_column(candidate_timestamp, now)
-        if candidate_timestamp not in {mark[0] for mark in normal_marks} and 0 <= position and position + 2 <= GRAPH_WIDTH:
-            axis[position] = "┬"
-            _put(labels, position, candidate.strftime("%H"))
     return "".join(axis), "".join(labels).rstrip()
 
 

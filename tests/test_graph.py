@@ -95,10 +95,10 @@ class GraphTests(unittest.TestCase):
     def test_axis_ticks_and_labels_follow_the_twenty_minute_projection(self):
         midnight = stamp(23) + 3600
         expected = {
-            stamp(23): ([0, 9, 18, 27, 36], "17       20       23       02"),
-            stamp(23, 20): ([2, 8, 17, 26, 35], "  18    20       23       02       05"),
-            stamp(23, 40): ([1, 7, 16, 25, 34], " 18    20       23       02       05"),
-            midnight: ([0, 6, 15, 24, 33], "18    20       23       02       05"),
+            stamp(23): (list(range(0, GRAPH_WIDTH, 3)), "17 18 19 20 21 22 23 00 01 02 03 04"),
+            stamp(23, 20): (list(range(2, GRAPH_WIDTH, 3)), "  18 19 20 21 22 23 00 01 02 03 04 05"),
+            stamp(23, 40): (list(range(1, GRAPH_WIDTH, 3)), " 18 19 20 21 22 23 00 01 02 03 04 05"),
+            midnight: (list(range(0, GRAPH_WIDTH, 3)), "18 19 20 21 22 23 00 01 02 03 04 05"),
         }
         for now, (ticks, labels) in expected.items():
             with self.subTest(now=now):
@@ -117,13 +117,15 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(labels[position:position + 2], "20")
         self.assertEqual(axis[position], "┬")
 
-    def test_first_complete_hour_fills_left_edge_at_its_real_position(self):
+    def test_every_complete_hour_uses_its_real_position(self):
         axis, labels = axis_rows(stamp(23, 20))
         position = project_column(stamp(18), stamp(23, 20))
         self.assertEqual(position, 2)
         self.assertEqual(labels[position:position + 2], "18")
         self.assertEqual(axis[position], "┬")
-        self.assertEqual(axis.count("┬"), 5)
+        self.assertEqual(axis.count("┬"), 12)
+        tick_positions = [index for index, character in enumerate(axis) if character == "┬"]
+        self.assertTrue(all(right - left == 3 for left, right in zip(tick_positions, tick_positions[1:])))
 
     def test_absolute_tick_and_graph_data_use_same_projection(self):
         fixed = stamp(23)
