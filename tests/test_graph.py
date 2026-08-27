@@ -203,11 +203,10 @@ class GraphTests(unittest.TestCase):
         session = Session(1, "discharging", stamp(20), None, 55, None)
         rendered = render_dashboard(self.current, self.history, session, Estimate(7200, "test"), self.now, [sleep])
         lines = plain(rendered).splitlines()
-        self.assertEqual(len(lines), 6)
+        self.assertEqual(len(lines), 5)
         self.assertIn("1h00", lines[1])
         self.assertTrue(lines[1].startswith("1h00"))
         self.assertTrue(lines[2].startswith("start"))
-        self.assertEqual(lines[3], "")
         self.assertIn("⣀⣀⣀", lines[1])
         self.assertIn("z", lines[2])
         self.assertIn("\x1b[2m", rendered)
@@ -217,7 +216,8 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(lines[1][GRAPH_OFFSET + GRAPH_WIDTH], " ")
         self.assertEqual(lines[1][eta_start:], "2h00 ~23:00")
         self.assertEqual(lines[2][eta_start:], "empty")
-        self.assertIn("┬", lines[4])
+        self.assertIn("┬", lines[3])
+        self.assertRegex(lines[4], r"\d{2}")
         self.assertEqual(max(len(line) for line in lines), 55)
 
     def test_meaning_labels_are_conditional(self):

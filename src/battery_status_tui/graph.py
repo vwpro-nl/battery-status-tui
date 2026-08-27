@@ -239,7 +239,6 @@ def render_dashboard(
             f"{MUTED}{left_label}{RESET}{_style_sleep(top)} {DIM}{right_label}{RESET}",
             f"{MUTED}{DIM}{left_meaning.ljust(GRAPH_OFFSET)}{RESET}{_style_sleep(bottom)} "
             f"{MUTED}{DIM}{right_meaning}{RESET}".rstrip(),
-            "",
             " " * GRAPH_OFFSET + axis,
             " " * GRAPH_OFFSET + labels,
         )
