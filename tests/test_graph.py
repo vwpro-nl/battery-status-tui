@@ -3,13 +3,16 @@ from __future__ import annotations
 import datetime as dt
 import re
 import unittest
+from unittest.mock import patch
 
+import battery_status_tui.graph as graph_module
 from battery_status_tui.graph import (
     COLUMN_SECONDS, FORECAST_SECONDS, GRAPH_OFFSET, GRAPH_WIDTH,
     HISTORY_SECONDS, NOW_INDEX, TIME_COLUMNS,
-    _battery_color, _braille_fill, _chart_rows_and_percentages, _fill_chars,
-    _sleep_columns, _sleep_fraction, _style_battery, axis_rows, chart_rows, column_timestamp,
-    project_column, render_dashboard, title_line,
+    _battery_color, _braille_fill, _braille_mask, _braille_subcolumn_times,
+    _chart_rows_and_percentages, _fill_chars, _sleep_columns, _sleep_fraction,
+    _style_battery, axis_rows, chart_rows, column_timestamp, project_column,
+    render_dashboard, title_line,
 )
 from battery_status_tui.models import Estimate, Measurement, Session, SleepInterval
 
@@ -178,6 +181,39 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(_braille_fill(75), ("⣤", "⣿"))
         self.assertEqual(_braille_fill(100), ("⣿", "⣿"))
         self.assertNotEqual(_braille_fill(75)[0], "⣿")
+
+    def test_braille_mask_uses_independent_official_dot_columns(self):
+        left_top_only = ord(_braille_mask(4, 3)) - 0x2800
+        right_top_only = ord(_braille_mask(3, 4)) - 0x2800
+        both_top = ord(_braille_mask(4, 4)) - 0x2800
+        self.assertTrue(left_top_only & 0x01)
+        self.assertFalse(left_top_only & 0x08)
+        self.assertFalse(right_top_only & 0x01)
+        self.assertTrue(right_top_only & 0x08)
+        self.assertTrue(both_top & 0x01)
+        self.assertTrue(both_top & 0x08)
+        self.assertEqual(_braille_mask(4, 4), "⣿")
+        self.assertEqual(_braille_mask(0, 0), " ")
+
+    def test_braille_mask_supports_odd_dot_counts(self):
+        self.assertEqual((ord(_braille_mask(3, 2)) - 0x2800).bit_count(), 5)
+        self.assertEqual((ord(_braille_mask(4, 3)) - 0x2800).bit_count(), 7)
+
+    def test_braille_fill_tracks_rising_and_falling_subcolumns(self):
+        self.assertEqual(_braille_fill(50, 62.5), ("⢀", "⣿"))
+        self.assertEqual(_braille_fill(62.5, 50), ("⡀", "⣿"))
+
+    def test_braille_subcolumn_times_derive_from_bucket_duration(self):
+        self.assertEqual(_braille_subcolumn_times(1000, 15 * 60), (1225, 1675))
+
+    def test_sleep_and_forecast_share_braille_fill_helper(self):
+        sleep = SleepInterval(stamp(20), stamp(20, 20), pre_percentage=50, post_percentage=75)
+        with patch.object(graph_module, "_braille_fill", wraps=graph_module._braille_fill) as fill:
+            chart_rows(self.current, [], None, self.now, [sleep])
+            self.assertGreater(fill.call_count, 0)
+            fill.reset_mock()
+            chart_rows(self.current, [], Estimate(3600, "test"), self.now)
+            self.assertGreater(fill.call_count, 0)
 
     def test_forecast_stops_at_estimated_empty(self):
         top, bottom = chart_rows(self.current, self.history, Estimate(1800, "test"), self.now)

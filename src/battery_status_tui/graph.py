@@ -36,7 +36,8 @@ FORECAST_SECONDS = 6 * 3600
 TICK_SECONDS = 3600
 GRAPH_OFFSET = 6
 BLOCKS = " ▁▂▃▄▅▆▇█"
-BRAILLE_ROWS_BOTTOM_UP = (0xC0, 0x24, 0x12, 0x09)
+BRAILLE_LEFT_BOTTOM_UP = (0x40, 0x04, 0x02, 0x01)
+BRAILLE_RIGHT_BOTTOM_UP = (0x80, 0x20, 0x10, 0x08)
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -58,13 +59,23 @@ def _fill_chars(percentage: float) -> tuple[str, str]:
     return top, bottom
 
 
-def _braille_fill(percentage: float) -> tuple[str, str]:
-    levels = max(0, min(8, round(percentage / 100 * 8)))
+def _braille_mask(left_count: int, right_count: int) -> str:
+    mask = sum(BRAILLE_LEFT_BOTTOM_UP[:left_count]) + sum(BRAILLE_RIGHT_BOTTOM_UP[:right_count])
+    return " " if mask == 0 else chr(0x2800 + mask)
 
-    def glyph(count: int) -> str:
-        return " " if count == 0 else chr(0x2800 + sum(BRAILLE_ROWS_BOTTOM_UP[:count]))
 
-    return glyph(max(0, levels - 4)), glyph(min(4, levels))
+def _braille_fill(left_percentage: float, right_percentage: float | None = None) -> tuple[str, str]:
+    right_percentage = left_percentage if right_percentage is None else right_percentage
+    left_levels = max(0, min(8, round(left_percentage / 100 * 8)))
+    right_levels = max(0, min(8, round(right_percentage / 100 * 8)))
+    return (
+        _braille_mask(max(0, left_levels - 4), max(0, right_levels - 4)),
+        _braille_mask(min(4, left_levels), min(4, right_levels)),
+    )
+
+
+def _braille_subcolumn_times(bucket_start: float, bucket_duration: int) -> tuple[float, float]:
+    return bucket_start + bucket_duration / 4, bucket_start + bucket_duration * 3 / 4
 
 def project_column(timestamp: int, now: int) -> int:
     """Project an exact timestamp onto the shared 20-minute display grid."""
@@ -156,6 +167,13 @@ def _chart_rows_and_percentages(
         pre_percentage, post_percentage = _sleep_boundary_percentages(interval, history)
         if pre_percentage is None or post_percentage is None or interval.ended_at <= interval.started_at:
             continue
+
+        def sleep_percentage(timestamp: float) -> float:
+            fraction = max(0.0, min(
+                1.0, (timestamp - interval.started_at) / (interval.ended_at - interval.started_at)
+            ))
+            return pre_percentage + (post_percentage - pre_percentage) * fraction
+
         for column in columns:
             if any(
                 interval.started_at <= sample.timestamp < interval.ended_at
@@ -163,12 +181,13 @@ def _chart_rows_and_percentages(
                 for sample in history
             ):
                 continue
-            timestamp = column_timestamp(column, now) + COLUMN_SECONDS / 2
-            fraction = max(0.0, min(
-                1.0, (timestamp - interval.started_at) / (interval.ended_at - interval.started_at)
-            ))
-            percentage = pre_percentage + (post_percentage - pre_percentage) * fraction
-            top[column], bottom[column] = _braille_fill(percentage)
+            bucket_start = column_timestamp(column, now)
+            center_timestamp = bucket_start + COLUMN_SECONDS / 2
+            left_timestamp, right_timestamp = _braille_subcolumn_times(bucket_start, COLUMN_SECONDS)
+            percentage = sleep_percentage(center_timestamp)
+            top[column], bottom[column] = _braille_fill(
+                sleep_percentage(left_timestamp), sleep_percentage(right_timestamp)
+            )
             percentages_by_column[column] = percentage
 
     top[NOW_INDEX] = "│"
@@ -181,16 +200,24 @@ def _chart_rows_and_percentages(
         endpoint = now + FORECAST_SECONDS if full_on_ac or kind == "charging" else min(
             now + estimate.seconds, now + FORECAST_SECONDS
         )
+
+        def forecast_percentage(timestamp: float) -> float:
+            if full_on_ac:
+                return 100.0
+            elapsed = max(0.0, timestamp - now)
+            fraction = min(1.0, elapsed / estimate.seconds)
+            target = 100.0 if kind == "charging" else 0.0
+            return current.percentage + (target - current.percentage) * fraction
+
         last_column = min(GRAPH_WIDTH - 1, project_column(endpoint, now))
         for column in range(NOW_INDEX + 1, min(GRAPH_WIDTH, last_column + 1)):
-            if full_on_ac:
-                percentage = 100.0
-            else:
-                elapsed = column_timestamp(column, now) - now
-                fraction = min(1.0, elapsed / estimate.seconds)
-                target = 100.0 if kind == "charging" else 0.0
-                percentage = current.percentage + (target - current.percentage) * fraction
-            forecast_top, forecast_bottom = _braille_fill(percentage)
+            bucket_start = column_timestamp(column, now)
+            center_timestamp = bucket_start + COLUMN_SECONDS / 2
+            left_timestamp, right_timestamp = _braille_subcolumn_times(bucket_start, COLUMN_SECONDS)
+            percentage = forecast_percentage(center_timestamp)
+            forecast_top, forecast_bottom = _braille_fill(
+                forecast_percentage(left_timestamp), forecast_percentage(right_timestamp)
+            )
             top[column] = forecast_top
             bottom[column] = forecast_bottom
             percentages_by_column[column] = percentage
