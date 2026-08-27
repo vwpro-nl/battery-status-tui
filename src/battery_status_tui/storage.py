@@ -143,6 +143,24 @@ class Storage:
             cursor = db.execute("DELETE FROM samples WHERE timestamp < ?", (cutoff,))
             return cursor.rowcount
 
+    def metadata_int(self, key: str) -> int | None:
+        with self.connect() as db:
+            row = db.execute("SELECT value FROM metadata WHERE key = ?", (key,)).fetchone()
+        if row is None:
+            return None
+        try:
+            return int(row["value"])
+        except ValueError:
+            return None
+
+    def set_metadata_int(self, key: str, value: int) -> None:
+        with self.connect() as db:
+            db.execute(
+                "INSERT INTO metadata(key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, str(value)),
+            )
+
     @staticmethod
     def _session(row: sqlite3.Row) -> Session:
         return Session(

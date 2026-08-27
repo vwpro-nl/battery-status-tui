@@ -1,0 +1,7 @@
+[Unit]
+Description=Record one battery-status-tui sample
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/battery-status-tui --sample
+

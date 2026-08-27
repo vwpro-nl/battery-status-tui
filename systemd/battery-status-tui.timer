@@ -1,0 +1,13 @@
+[Unit]
+Description=Record battery status every minute
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Persistent=true
+Unit=battery-status-tui.service
+
+[Install]
+WantedBy=timers.target
+
