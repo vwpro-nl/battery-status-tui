@@ -8,7 +8,7 @@ from battery_status_tui.graph import (
     COLUMN_SECONDS, FORECAST_SECONDS, GRAPH_OFFSET, GRAPH_WIDTH,
     HISTORY_SECONDS, NOW_INDEX, TIME_COLUMNS,
     _battery_color, _braille_fill, _chart_rows_and_percentages, _fill_chars,
-    _sleep_columns, _style_battery, axis_rows, chart_rows, column_timestamp,
+    _sleep_columns, _sleep_fraction, _style_battery, axis_rows, chart_rows, column_timestamp,
     project_column, render_dashboard, title_line,
 )
 from battery_status_tui.models import Estimate, Measurement, Session, SleepInterval
@@ -308,7 +308,7 @@ class GraphTests(unittest.TestCase):
         self.assertNotEqual((top[17], bottom[17]), (" ", " "))
 
     def test_short_sleep_below_fifty_uses_one_braille_column(self):
-        sleep = SleepInterval(stamp(20, 5), stamp(20, 10), pre_percentage=40, post_percentage=39)
+        sleep = SleepInterval(stamp(20, 5), stamp(20, 10) + 1, pre_percentage=40, post_percentage=39)
         top, bottom, percentages = _chart_rows_and_percentages(self.current, [], None, self.now, [sleep])
         sleep_columns = [index for index, value in enumerate(percentages[:NOW_INDEX]) if value is not None]
         self.assertEqual(len(sleep_columns), 1)
@@ -316,6 +316,53 @@ class GraphTests(unittest.TestCase):
         self.assertTrue(all(character == " " or 0x2800 <= ord(character) <= 0x28ff
                             for character in (top[column], bottom[column])))
         self.assertNotIn("z", top + bottom)
+
+    def test_sleep_bucket_threshold_uses_overlap_fraction(self):
+        bucket_start = stamp(20)
+        duration = COLUMN_SECONDS
+        cases = (
+            (SleepInterval(bucket_start - duration, bucket_start), 0.00, False),
+            (SleepInterval(bucket_start, bucket_start + round(duration * 0.24)), 0.24, False),
+            (SleepInterval(bucket_start, bucket_start + duration // 4), 0.25, False),
+            (SleepInterval(bucket_start, bucket_start + duration // 4 + 1), None, True),
+            (SleepInterval(bucket_start, bucket_start + duration // 2), 0.50, True),
+            (SleepInterval(bucket_start, bucket_start + duration), 1.00, True),
+        )
+        for interval, expected_fraction, braille in cases:
+            with self.subTest(expected_fraction=expected_fraction, braille=braille):
+                fraction = _sleep_fraction(interval, bucket_start, duration)
+                if expected_fraction is not None:
+                    self.assertAlmostEqual(fraction, expected_fraction)
+                self.assertEqual(fraction > 0.25, braille)
+
+    def test_sleep_fraction_is_dynamic_for_fifteen_minute_bucket(self):
+        duration = 15 * 60
+        bucket_start = stamp(20)
+        exact = SleepInterval(bucket_start, bucket_start + duration // 4)
+        above = SleepInterval(bucket_start, bucket_start + duration // 4 + 1)
+        self.assertEqual(_sleep_fraction(exact, bucket_start, duration), 0.25)
+        self.assertFalse(_sleep_fraction(exact, bucket_start, duration) > 0.25)
+        self.assertTrue(_sleep_fraction(above, bucket_start, duration) > 0.25)
+
+    def test_known_partial_sleep_intervals_select_expected_columns(self):
+        short = SleepInterval(stamp(21, 19) + 37, stamp(21, 36) + 55)
+        long = SleepInterval(stamp(23, 42) + 23, stamp(23) + 3600 + 39 * 60 + 43)
+        self.assertEqual(len(_sleep_columns(short, stamp(23) + 3 * 3600)), 1)
+        self.assertEqual(len(_sleep_columns(long, stamp(23) + 3 * 3600)), 3)
+
+    def test_pre_sleep_sample_in_same_bucket_does_not_block_braille(self):
+        sleep = SleepInterval(stamp(20, 5), stamp(20, 15), pre_percentage=60, post_percentage=58)
+        top, bottom = chart_rows(self.current, [sample(stamp(20, 4), 60)], None, self.now, [sleep])
+        column = project_column(stamp(20), self.now)
+        self.assertTrue(all(0x2800 <= ord(character) <= 0x28ff for character in
+                            (top[column], bottom[column]) if character != " "))
+
+    def test_post_resume_sample_in_same_bucket_does_not_block_braille(self):
+        sleep = SleepInterval(stamp(20, 5), stamp(20, 15), pre_percentage=60, post_percentage=58)
+        top, bottom = chart_rows(self.current, [sample(stamp(20, 16), 58)], None, self.now, [sleep])
+        column = project_column(stamp(20), self.now)
+        self.assertTrue(all(0x2800 <= ord(character) <= 0x28ff for character in
+                            (top[column], bottom[column]) if character != " "))
 
     def test_partial_sleep_boundary_does_not_overwrite_adjacent_history(self):
         history = [sample(stamp(17, 55), 56), sample(stamp(20, 5), 51)]

@@ -83,24 +83,24 @@ def _history_column(timestamp: int, now: int) -> int | None:
     return column if sample_bucket <= latest_closed_bucket and 0 <= column < NOW_INDEX else None
 
 
-def _sleep_columns(interval: SleepInterval, now: int) -> range:
-    first_full_bucket = (interval.started_at + COLUMN_SECONDS - 1) // COLUMN_SECONDS
-    after_last_full_bucket = interval.ended_at // COLUMN_SECONDS
-    if first_full_bucket < after_last_full_bucket:
-        first_bucket = first_full_bucket
-        last_bucket = after_last_full_bucket - 1
-    else:
-        midpoint = interval.started_at + (interval.ended_at - interval.started_at) // 2
-        first_bucket = last_bucket = midpoint // COLUMN_SECONDS
-    latest_closed_bucket = now // COLUMN_SECONDS - 1
-    last_bucket = min(last_bucket, latest_closed_bucket)
-    if first_bucket > last_bucket:
-        return range(0)
-    start = NOW_INDEX - 1 - (latest_closed_bucket - first_bucket)
-    end = NOW_INDEX - 1 - (latest_closed_bucket - last_bucket)
-    start = max(0, min(NOW_INDEX - 1, start))
-    end = max(start, min(NOW_INDEX - 1, end))
-    return range(start, end + 1)
+def _sleep_fraction(interval: SleepInterval, bucket_start: int, bucket_duration: int) -> float:
+    overlap = max(0, min(interval.ended_at, bucket_start + bucket_duration)
+                  - max(interval.started_at, bucket_start))
+    return overlap / bucket_duration
+
+
+def _sleep_columns(interval: SleepInterval, now: int) -> list[int]:
+    if interval.ended_at <= interval.started_at:
+        return []
+    first_bucket = interval.started_at // COLUMN_SECONDS
+    last_bucket = (interval.ended_at - 1) // COLUMN_SECONDS
+    columns = []
+    for bucket in range(first_bucket, last_bucket + 1):
+        bucket_start = bucket * COLUMN_SECONDS
+        column = project_column(bucket_start, now)
+        if 0 <= column < NOW_INDEX and _sleep_fraction(interval, bucket_start, COLUMN_SECONDS) > 0.25:
+            columns.append(column)
+    return columns
 
 
 def _sleep_boundary_percentages(
@@ -157,7 +157,11 @@ def _chart_rows_and_percentages(
         if pre_percentage is None or post_percentage is None or interval.ended_at <= interval.started_at:
             continue
         for column in columns:
-            if column in buckets:
+            if any(
+                interval.started_at <= sample.timestamp < interval.ended_at
+                and _history_column(sample.timestamp, now) == column
+                for sample in history
+            ):
                 continue
             timestamp = column_timestamp(column, now) + COLUMN_SECONDS / 2
             fraction = max(0.0, min(
