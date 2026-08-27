@@ -18,6 +18,8 @@ BOLD = CSI + "1m"
 CYAN = CSI + "38;5;81m"
 GREEN = CSI + "38;5;114m"
 YELLOW = CSI + "38;5;221m"
+ORANGE = CSI + "38;5;208m"
+RED = CSI + "38;5;203m"
 MUTED = CSI + "38;5;244m"
 DIM = CSI + "2m"
 
@@ -109,23 +111,36 @@ def _sleep_z_columns(columns: range) -> set[int]:
     return {columns.start + (2 * index + 1) * width // (2 * count) for index in range(count)}
 
 
-def chart_rows(
+def _battery_color(percentage: float) -> str:
+    if percentage < 25:
+        return RED
+    if percentage < 50:
+        return ORANGE
+    if percentage < 75:
+        return YELLOW
+    return GREEN
+
+
+def _chart_rows_and_percentages(
     current: Measurement,
     history: Sequence[Measurement],
     estimate: Estimate | None,
     now: int,
     sleep_intervals: Sequence[SleepInterval] = (),
-) -> tuple[str, str]:
+) -> tuple[str, str, list[float | None]]:
     top = [" "] * GRAPH_WIDTH
     bottom = [" "] * GRAPH_WIDTH
+    percentages_by_column: list[float | None] = [None] * GRAPH_WIDTH
     buckets: dict[int, list[float]] = defaultdict(list)
     for sample in history:
         if now - HISTORY_SECONDS <= sample.timestamp < now and not _inside_sleep(sample.timestamp, sleep_intervals):
             column = _history_column(sample.timestamp, now)
             if column is not None:
                 buckets[column].append(sample.percentage)
-    for column, percentages in buckets.items():
-        top[column], bottom[column] = _fill_chars(statistics.median(percentages))
+    for column, bucket_percentages in buckets.items():
+        percentage = statistics.median(bucket_percentages)
+        top[column], bottom[column] = _fill_chars(percentage)
+        percentages_by_column[column] = percentage
 
     for interval in sleep_intervals:
         if interval.ended_at <= now - HISTORY_SECONDS or interval.started_at >= now:
@@ -135,6 +150,7 @@ def chart_rows(
         for column in columns:
             top[column] = "⣀"
             bottom[column] = "z" if column in z_columns else " "
+            percentages_by_column[column] = None
 
     top[NOW_INDEX] = "│"
     bottom[NOW_INDEX] = "│"
@@ -150,7 +166,19 @@ def chart_rows(
             forecast_top, forecast_bottom = _braille_point(percentage, column % 2 == 0)
             top[column] = forecast_top
             bottom[column] = forecast_bottom
-    return "".join(top), "".join(bottom)
+            percentages_by_column[column] = percentage
+    return "".join(top), "".join(bottom), percentages_by_column
+
+
+def chart_rows(
+    current: Measurement,
+    history: Sequence[Measurement],
+    estimate: Estimate | None,
+    now: int,
+    sleep_intervals: Sequence[SleepInterval] = (),
+) -> tuple[str, str]:
+    top, bottom, _ = _chart_rows_and_percentages(current, history, estimate, now, sleep_intervals)
+    return top, bottom
 
 
 def format_duration(seconds: int | None) -> str:
@@ -185,6 +213,15 @@ def _style_sleep(row: str) -> str:
     return re.sub(r"([⣀z]+)", rf"{MUTED}{DIM}\1{RESET}", row)
 
 
+def _style_battery(row: str, percentages: Sequence[float | None]) -> str:
+    styled = "".join(
+        f"{_battery_color(percentage)}{character}{RESET}"
+        if percentage is not None and character != " " else character
+        for character, percentage in zip(row, percentages)
+    )
+    return _style_sleep(styled)
+
+
 def title_line(current: Measurement) -> str:
     arrow = "↑" if current.session_kind == "charging" else "↓" if current.session_kind == "discharging" else "·"
     arrow_column = GRAPH_OFFSET + NOW_INDEX
@@ -207,7 +244,7 @@ def render_dashboard(
     now: int,
     sleep_intervals: Sequence[SleepInterval] = (),
 ) -> str:
-    top, bottom = chart_rows(current, history, estimate, now, sleep_intervals)
+    top, bottom, percentages = _chart_rows_and_percentages(current, history, estimate, now, sleep_intervals)
     elapsed = None if session is None else max(0, now - session.started_at)
     left_label = format_duration(elapsed).ljust(GRAPH_OFFSET)
     if estimate is None:
@@ -223,8 +260,8 @@ def render_dashboard(
     return "\n".join(
         (
             title_line(current),
-            f"{MUTED}{left_label}{RESET}{_style_sleep(top)} {DIM}{right_label}{RESET}",
-            f"{MUTED}{DIM}{left_meaning.ljust(GRAPH_OFFSET)}{RESET}{_style_sleep(bottom)} "
+            f"{MUTED}{left_label}{RESET}{_style_battery(top, percentages)} {DIM}{right_label}{RESET}",
+            f"{MUTED}{DIM}{left_meaning.ljust(GRAPH_OFFSET)}{RESET}{_style_battery(bottom, percentages)} "
             f"{MUTED}{DIM}{right_meaning}{RESET}".rstrip(),
             " " * GRAPH_OFFSET + axis,
             " " * GRAPH_OFFSET + labels,

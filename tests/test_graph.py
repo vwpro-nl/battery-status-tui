@@ -5,9 +5,10 @@ import re
 import unittest
 
 from battery_status_tui.graph import (
-    COLUMN_SECONDS, FORECAST_SECONDS, GRAPH_OFFSET, GRAPH_WIDTH, HISTORY_SECONDS,
-    NOW_INDEX, TIME_COLUMNS, axis_rows, chart_rows, column_timestamp,
-    project_column, render_dashboard, title_line,
+    COLUMN_SECONDS, FORECAST_SECONDS, GRAPH_OFFSET, GRAPH_WIDTH, GREEN,
+    HISTORY_SECONDS, NOW_INDEX, ORANGE, RED, TIME_COLUMNS, YELLOW,
+    _battery_color, _chart_rows_and_percentages, _style_battery, axis_rows,
+    chart_rows, column_timestamp, project_column, render_dashboard, title_line,
 )
 from battery_status_tui.models import Estimate, Measurement, Session, SleepInterval
 
@@ -160,6 +161,66 @@ class GraphTests(unittest.TestCase):
         endpoint = project_column(self.now + 1800, self.now)
         self.assertTrue((top[NOW_INDEX + 1:endpoint + 1] + bottom[NOW_INDEX + 1:endpoint + 1]).strip())
         self.assertFalse((top[endpoint + 1:] + bottom[endpoint + 1:]).strip())
+
+    def test_battery_color_boundaries(self):
+        self.assertEqual(_battery_color(24.9), RED)
+        self.assertEqual(_battery_color(25.0), ORANGE)
+        self.assertEqual(_battery_color(49.9), ORANGE)
+        self.assertEqual(_battery_color(50.0), YELLOW)
+        self.assertEqual(_battery_color(74.9), YELLOW)
+        self.assertEqual(_battery_color(75.0), GREEN)
+
+    def test_history_columns_use_their_aggregated_percentages(self):
+        history = [
+            sample(stamp(19, 40), 20),
+            sample(stamp(20), 20), sample(stamp(20, 10), 40),
+            sample(stamp(20, 20), 60), sample(stamp(20, 40), 80),
+        ]
+        top, bottom, percentages = _chart_rows_and_percentages(self.current, history, None, self.now)
+        expected = {
+            project_column(stamp(19, 40), self.now): (20, RED),
+            project_column(stamp(20), self.now): (30, ORANGE),
+            project_column(stamp(20, 20), self.now): (60, YELLOW),
+            project_column(stamp(20, 40), self.now): (80, GREEN),
+        }
+        styled = _style_battery(top, percentages) + _style_battery(bottom, percentages)
+        for column, (percentage, color) in expected.items():
+            self.assertEqual(percentages[column], percentage)
+            self.assertIn(color, styled)
+
+    def test_charging_forecast_changes_from_yellow_to_green(self):
+        current = Measurement(self.now, 60, "charging", True)
+        top, bottom, percentages = _chart_rows_and_percentages(
+            current, [], Estimate(6 * 3600, "test"), self.now
+        )
+        forecast = percentages[NOW_INDEX + 1:]
+        self.assertTrue(any(value is not None and 50 <= value < 75 for value in forecast))
+        self.assertTrue(any(value is not None and value >= 75 for value in forecast))
+        styled = _style_battery(top, percentages) + _style_battery(bottom, percentages)
+        self.assertIn(YELLOW, styled)
+        self.assertIn(GREEN, styled)
+
+    def test_discharging_forecast_changes_from_yellow_to_orange_to_red(self):
+        current = Measurement(self.now, 60, "discharging", False)
+        top, bottom, percentages = _chart_rows_and_percentages(
+            current, [], Estimate(6 * 3600, "test"), self.now
+        )
+        styled = _style_battery(top, percentages) + _style_battery(bottom, percentages)
+        self.assertIn(YELLOW, styled)
+        self.assertIn(ORANGE, styled)
+        self.assertIn(RED, styled)
+
+    def test_battery_colors_preserve_width_now_axis_and_sleep(self):
+        sleep = SleepInterval(stamp(18), stamp(19), pre_percentage=55, post_percentage=53)
+        rendered = render_dashboard(
+            self.current, self.history, None, Estimate(7200, "test"), self.now, [sleep]
+        )
+        lines = plain(rendered).splitlines()
+        self.assertEqual(len(lines[1][GRAPH_OFFSET:GRAPH_OFFSET + GRAPH_WIDTH]), GRAPH_WIDTH)
+        self.assertEqual(lines[1][GRAPH_OFFSET + NOW_INDEX], "│")
+        self.assertEqual(lines[2][GRAPH_OFFSET + NOW_INDEX], "│")
+        self.assertEqual(lines[3][GRAPH_OFFSET:], axis_rows(self.now)[0])
+        self.assertIn("\x1b[38;5;244m\x1b[2m⣀", rendered)
 
     def test_pre_sleep_sleep_and_post_resume_segments_all_remain_visible(self):
         sleep = SleepInterval(stamp(18), stamp(20), pre_percentage=55, post_percentage=51)
