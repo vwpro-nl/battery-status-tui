@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import datetime as dt
 import re
 import unittest
 
-from battery_status_tui.graph import GRAPH_OFFSET, NOW_INDEX, chart_rows, render_dashboard, title_line
+from battery_status_tui.graph import (
+    COLUMN_SECONDS, FORECAST_SECONDS, GRAPH_OFFSET, GRAPH_WIDTH, HISTORY_SECONDS,
+    NOW_INDEX, TIME_COLUMNS, axis_rows, chart_rows, column_timestamp,
+    project_column, render_dashboard, title_line,
+)
 from battery_status_tui.models import Estimate, Measurement, Session, SleepInterval
 
 
@@ -14,43 +19,127 @@ def plain(value: str) -> str:
     return ANSI.sub("", value)
 
 
+def stamp(hour: int, minute: int = 0) -> int:
+    return int(dt.datetime(2026, 8, 27, hour, minute).astimezone().timestamp())
+
+
+def sample(timestamp: int, percentage: float = 50) -> Measurement:
+    return Measurement(timestamp, percentage, "discharging", False)
+
+
 class GraphTests(unittest.TestCase):
     def setUp(self):
-        self.current = Measurement(21600, 48, "discharging", False, power_w=8.4)
-        self.history = [Measurement(timestamp, 60 - timestamp / 1800, "discharging", False) for timestamp in range(0, 21601, 900)]
+        self.now = stamp(21)
+        self.current = Measurement(self.now, 48, "discharging", False, power_w=8.4)
+        self.history = [sample(timestamp, 60 - index / 10)
+                        for index, timestamp in enumerate(range(self.now - HISTORY_SECONDS, self.now, 60))]
 
-    def test_now_marker_and_title_arrow_share_column(self):
-        top, bottom = chart_rows(self.current, self.history, Estimate(7200, "test"), 21600)
+    def test_twelve_hours_use_36_time_columns(self):
+        self.assertEqual(TIME_COLUMNS, 36)
+        self.assertEqual(COLUMN_SECONDS, 20 * 60)
+        self.assertEqual((HISTORY_SECONDS, FORECAST_SECONDS), (6 * 3600, 6 * 3600))
+        self.assertEqual(GRAPH_WIDTH, 37)  # 36 time cells plus the central NOW marker
+        self.assertEqual(NOW_INDEX, 18)
+
+    def test_projection_moves_once_at_each_twenty_minute_boundary(self):
+        fixed = stamp(20)
+        expected = {
+            (20, 0): 18, (20, 19): 18,
+            (20, 20): 17, (20, 39): 17,
+            (20, 40): 16, (20, 59): 16,
+            (21, 0): 15,
+        }
+        for (hour, minute), column in expected.items():
+            with self.subTest(hour=hour, minute=minute):
+                self.assertEqual(project_column(fixed, stamp(hour, minute)), column)
+
+    def test_column_inverse_uses_same_projection(self):
+        now = stamp(20, 19)
+        for column in range(GRAPH_WIDTH):
+            self.assertEqual(project_column(column_timestamp(column, now), now), column)
+
+    def test_axis_uses_same_grid_and_moves_one_column_at_20_minutes(self):
+        axis_before, labels_before = axis_rows(stamp(20, 19))
+        axis_after, labels_after = axis_rows(stamp(20, 20))
+        ticks_before = [index for index, character in enumerate(axis_before) if character == "┬"]
+        ticks_after = [index for index, character in enumerate(axis_after) if character == "┬"]
+        self.assertEqual(ticks_after, [position - 1 for position in ticks_before])
+        self.assertIn("18", labels_before)
+        self.assertIn("21", labels_before)
+        for position in ticks_after:
+            local = dt.datetime.fromtimestamp(column_timestamp(position, stamp(20, 20))).astimezone()
+            self.assertEqual(local.minute, 0)
+            self.assertEqual(local.hour % 3, 0)
+
+    def test_hour_boundary_is_one_column_not_an_hour_jump(self):
+        fixed = stamp(20)
+        self.assertEqual(project_column(fixed, stamp(20, 59)) - project_column(fixed, stamp(21)), 1)
+
+    def test_now_marker_forecast_and_title_arrow_share_column(self):
+        top, bottom = chart_rows(self.current, self.history, Estimate(7200, "test"), self.now)
+        self.assertEqual(len(top), GRAPH_WIDTH)
         self.assertEqual(top[NOW_INDEX], "│")
         self.assertEqual(bottom[NOW_INDEX], "│")
         self.assertEqual(plain(title_line(self.current))[GRAPH_OFFSET + NOW_INDEX], "↓")
+        self.assertTrue((top[NOW_INDEX + 1:] + bottom[NOW_INDEX + 1:]).strip())
 
     def test_forecast_stops_at_estimated_empty(self):
-        top, bottom = chart_rows(self.current, self.history, Estimate(1800, "test"), 21600)
-        forecast = top[NOW_INDEX + 1 :] + bottom[NOW_INDEX + 1 :]
-        self.assertTrue(forecast.rstrip())
-        self.assertTrue(forecast.endswith(" " * 20))
+        top, bottom = chart_rows(self.current, self.history, Estimate(1800, "test"), self.now)
+        endpoint = project_column(self.now + 1800, self.now)
+        self.assertTrue((top[NOW_INDEX + 1:endpoint + 1] + bottom[NOW_INDEX + 1:endpoint + 1]).strip())
+        self.assertFalse((top[endpoint + 1:] + bottom[endpoint + 1:]).strip())
 
-    def test_dashboard_has_two_graph_rows(self):
-        session = Session(1, "discharging", 18000, None, 55, None)
-        rendered = plain(render_dashboard(self.current, self.history, session, Estimate(7200, "test"), 21600))
-        lines = rendered.splitlines()
+    def test_pre_sleep_sleep_and_post_resume_segments_all_remain_visible(self):
+        sleep = SleepInterval(stamp(18), stamp(20), pre_percentage=55, post_percentage=51)
+        top, bottom = chart_rows(self.current, self.history, None, self.now, [sleep])
+        self.assertNotEqual((top[8], bottom[8]), (" ", " "))  # 17:40 history
+        self.assertEqual(top[9:15], "......")
+        self.assertEqual(bottom[9:15], "zzzzzz")
+        self.assertNotEqual((top[15], bottom[15]), (" ", " "))  # 20:00 resumed history
+        self.assertNotEqual((top[17], bottom[17]), (" ", " "))
+
+    def test_short_sleep_marks_at_least_one_column(self):
+        sleep = SleepInterval(stamp(20, 5), stamp(20, 10), pre_percentage=49, post_percentage=49)
+        top, bottom = chart_rows(self.current, self.history, None, self.now, [sleep])
+        self.assertEqual(top.count("."), 1)
+        self.assertEqual(bottom.count("z"), 1)
+
+    def test_partial_sleep_boundary_does_not_overwrite_adjacent_history(self):
+        history = [sample(stamp(17, 55), 56), sample(stamp(20, 5), 51)]
+        sleep = SleepInterval(stamp(17, 57), stamp(20, 3), pre_percentage=56, post_percentage=51)
+        top, bottom = chart_rows(self.current, history, None, self.now, [sleep])
+        before = project_column(stamp(17, 55), self.now)
+        after = project_column(stamp(20, 5), self.now)
+        self.assertNotEqual((top[before], bottom[before]), (".", "z"))
+        self.assertNotEqual((top[before], bottom[before]), (" ", " "))
+        self.assertNotEqual((top[after], bottom[after]), (".", "z"))
+        self.assertNotEqual((top[after], bottom[after]), (" ", " "))
+
+    def test_sleep_width_tracks_twenty_minute_columns(self):
+        sleep = SleepInterval(stamp(18), stamp(21), pre_percentage=55, post_percentage=50)
+        top, bottom = chart_rows(self.current, self.history, None, self.now, [sleep])
+        self.assertEqual(top.count("."), 9)
+        self.assertEqual(bottom.count("z"), 9)
+
+    def test_unmeasured_non_sleep_gap_stays_empty(self):
+        history = [sample(stamp(16)), sample(stamp(18))]
+        top, bottom = chart_rows(self.current, history, None, self.now)
+        middle = project_column(stamp(17), self.now)
+        self.assertEqual((top[middle], bottom[middle]), (" ", " "))
+
+    def test_dashboard_keeps_two_graph_rows_and_dims_sleep(self):
+        sleep = SleepInterval(stamp(18), stamp(19), pre_percentage=55, post_percentage=53)
+        session = Session(1, "discharging", stamp(20), None, 55, None)
+        rendered = render_dashboard(self.current, self.history, session, Estimate(7200, "test"), self.now, [sleep])
+        lines = plain(rendered).splitlines()
         self.assertEqual(len(lines), 5)
         self.assertIn("1h00", lines[2])
-
-    def test_history_does_not_interpolate_over_gap(self):
-        history = [Measurement(0, 60, "discharging", False), Measurement(3600, 50, "discharging", False)]
-        top, bottom = chart_rows(self.current, history, None, 21600)
-        self.assertEqual(top[2:4], "  ")
-        self.assertEqual(bottom[2:4], "  ")
-
-    def test_sleep_interval_has_level_line_and_z(self):
-        sleep = SleepInterval(3600, 7200, pre_percentage=60)
-        top, bottom = chart_rows(self.current, self.history, None, 21600, [sleep])
-        self.assertIn("Z", top + bottom)
+        self.assertIn("...", lines[1])
+        self.assertIn("zzz", lines[2])
+        self.assertIn("\x1b[2m", rendered)
 
     def test_approximate_power_has_tilde(self):
-        current = Measurement(21600, 48, "discharging", False, power_w=7.2, power_approximate=True)
+        current = Measurement(self.now, 48, "discharging", False, power_w=7.2, power_approximate=True)
         self.assertIn("~7.2 W", plain(title_line(current)))
 
 

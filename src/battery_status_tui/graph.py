@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import datetime as dt
-import math
 import re
+import statistics
+from collections import defaultdict
 from collections.abc import Sequence
 
 from .models import Estimate, Measurement, Session, SleepInterval
@@ -19,12 +20,13 @@ YELLOW = CSI + "38;5;221m"
 MUTED = CSI + "38;5;244m"
 DIM = CSI + "2m"
 
-GRAPH_WIDTH = 49
-NOW_INDEX = GRAPH_WIDTH // 2
+TIME_COLUMNS = 36
+COLUMN_SECONDS = 20 * 60
+GRAPH_WIDTH = TIME_COLUMNS + 1
+NOW_INDEX = TIME_COLUMNS // 2
 HISTORY_SECONDS = 6 * 3600
 FORECAST_SECONDS = 6 * 3600
 GRAPH_OFFSET = 10
-MAX_INTERPOLATION_SECONDS = 180
 BLOCKS = " ▁▂▃▄▅▆▇█"
 BRAILLE_LEFT = ("⠁", "⠂", "⠄", "⡀")
 BRAILLE_RIGHT = ("⠈", "⠐", "⠠", "⢀")
@@ -56,25 +58,32 @@ def _braille_point(percentage: float, right_dot: bool) -> tuple[str, str]:
         return glyphs[position], " "
     return " ", glyphs[position - 4]
 
-def _sleep_level(percentage: float) -> tuple[int, str]:
-    position = max(0, min(7, round((100 - percentage) / 100 * 7)))
-    return (0 if position < 4 else 1), ("⠉", "⠒", "⠤", "⣀")[position % 4]
+def project_column(timestamp: int, now: int) -> int:
+    """Project an exact timestamp onto the shared 20-minute display grid."""
+    return NOW_INDEX + timestamp // COLUMN_SECONDS - now // COLUMN_SECONDS
 
 
-def _interpolate(samples: Sequence[Measurement], timestamp: int) -> float | None:
-    if not samples or timestamp < samples[0].timestamp:
-        return None
-    before = samples[0]
-    for after in samples[1:]:
-        if after.timestamp >= timestamp:
-            if after.timestamp == before.timestamp:
-                return after.percentage
-            if after.timestamp - before.timestamp > MAX_INTERPOLATION_SECONDS:
-                return None
-            fraction = (timestamp - before.timestamp) / (after.timestamp - before.timestamp)
-            return before.percentage + fraction * (after.percentage - before.percentage)
-        before = after
-    return before.percentage
+def column_timestamp(column: int, now: int) -> int:
+    """Return the exact boundary represented by a display column."""
+    return (now // COLUMN_SECONDS + column - NOW_INDEX) * COLUMN_SECONDS
+
+
+def _inside_sleep(timestamp: int, intervals: Sequence[SleepInterval]) -> bool:
+    return any(interval.started_at <= timestamp < interval.ended_at for interval in intervals)
+
+
+def _sleep_columns(interval: SleepInterval, now: int) -> range:
+    first_full_bucket = (interval.started_at + COLUMN_SECONDS - 1) // COLUMN_SECONDS
+    after_last_full_bucket = interval.ended_at // COLUMN_SECONDS
+    if first_full_bucket < after_last_full_bucket:
+        start = NOW_INDEX + first_full_bucket - now // COLUMN_SECONDS
+        end = NOW_INDEX + after_last_full_bucket - 1 - now // COLUMN_SECONDS
+    else:
+        midpoint = interval.started_at + (interval.ended_at - interval.started_at) // 2
+        start = end = project_column(midpoint, now)
+    start = max(0, min(NOW_INDEX - 1, start))
+    end = max(start, min(NOW_INDEX - 1, end))
+    return range(start, end + 1)
 
 
 def chart_rows(
@@ -84,35 +93,32 @@ def chart_rows(
     now: int,
     sleep_intervals: Sequence[SleepInterval] = (),
 ) -> tuple[str, str]:
-    ordered = sorted((*history, current), key=lambda sample: sample.timestamp)
     top = [" "] * GRAPH_WIDTH
     bottom = [" "] * GRAPH_WIDTH
-    for column in range(NOW_INDEX):
-        timestamp = now - HISTORY_SECONDS + round(column / NOW_INDEX * HISTORY_SECONDS)
-        percentage = _interpolate(ordered, timestamp)
-        if percentage is not None:
-            top[column], bottom[column] = _fill_chars(percentage)
+    buckets: dict[int, list[float]] = defaultdict(list)
+    for sample in history:
+        if now - HISTORY_SECONDS <= sample.timestamp < now and not _inside_sleep(sample.timestamp, sleep_intervals):
+            column = project_column(sample.timestamp, now)
+            if 0 <= column < NOW_INDEX:
+                buckets[column].append(sample.percentage)
+    for column, percentages in buckets.items():
+        top[column], bottom[column] = _fill_chars(statistics.median(percentages))
 
     for interval in sleep_intervals:
-        start = max(0, round((interval.started_at - (now - HISTORY_SECONDS)) / HISTORY_SECONDS * NOW_INDEX))
-        end = min(NOW_INDEX - 1, max(start, round((interval.ended_at - (now - HISTORY_SECONDS)) / HISTORY_SECONDS * NOW_INDEX)))
-        if end < 0 or start >= NOW_INDEX or interval.pre_percentage is None:
+        if interval.ended_at <= now - HISTORY_SECONDS or interval.started_at >= now:
             continue
-        row_index, glyph = _sleep_level(interval.pre_percentage)
-        sleep_row = top if row_index == 0 else bottom
-        for column in range(max(0, start), end + 1):
-            sleep_row[column] = glyph
-        for column in range(max(0, start + (end - start) // 2), end + 1, 7):
-            sleep_row[column] = "Z"
+        for column in _sleep_columns(interval, now):
+            top[column] = "."
+            bottom[column] = "z"
 
     top[NOW_INDEX] = "│"
     bottom[NOW_INDEX] = "│"
     kind = current.session_kind
     if estimate is not None and kind in {"charging", "discharging"}:
-        plotted_seconds = min(estimate.seconds, FORECAST_SECONDS)
-        last_column = NOW_INDEX + math.ceil(plotted_seconds / FORECAST_SECONDS * NOW_INDEX)
+        endpoint = min(now + estimate.seconds, now + FORECAST_SECONDS)
+        last_column = min(GRAPH_WIDTH - 1, project_column(endpoint, now))
         for column in range(NOW_INDEX + 1, min(GRAPH_WIDTH, last_column + 1)):
-            elapsed = (column - NOW_INDEX) / NOW_INDEX * FORECAST_SECONDS
+            elapsed = column_timestamp(column, now) - now
             fraction = min(1.0, elapsed / estimate.seconds)
             target = 100.0 if kind == "charging" else 0.0
             percentage = current.percentage + (target - current.percentage) * fraction
@@ -140,11 +146,18 @@ def _clock(timestamp: int) -> str:
 def axis_rows(now: int) -> tuple[str, str]:
     axis = ["─"] * GRAPH_WIDTH
     labels = [" "] * GRAPH_WIDTH
-    for position, offset in zip((0, 12, 24, 36, 48), (-6, -3, 0, 3, 6)):
-        axis[position] = "┬"
-        label = _clock(now + offset * 3600)
-        _put(labels, min(position, GRAPH_WIDTH - len(label)), label)
+    for position in range(GRAPH_WIDTH):
+        timestamp = column_timestamp(position, now)
+        local = dt.datetime.fromtimestamp(timestamp).astimezone()
+        if local.minute == 0 and local.hour % 3 == 0:
+            axis[position] = "┬"
+            label = _clock(timestamp)
+            _put(labels, min(position, GRAPH_WIDTH - len(label)), label)
     return "".join(axis), "".join(labels).rstrip()
+
+
+def _style_sleep(row: str) -> str:
+    return re.sub(r"([.z]+)", rf"{MUTED}{DIM}\1{RESET}", row)
 
 
 def title_line(current: Measurement) -> str:
@@ -181,8 +194,8 @@ def render_dashboard(
     return "\n".join(
         (
             title_line(current),
-            " " * GRAPH_OFFSET + top,
-            f"{MUTED}{left_label}{RESET}{bottom}  {DIM}{right_label}{RESET}",
+            " " * GRAPH_OFFSET + _style_sleep(top),
+            f"{MUTED}{left_label}{RESET}{_style_sleep(bottom)}  {DIM}{right_label}{RESET}",
             " " * GRAPH_OFFSET + axis,
             " " * GRAPH_OFFSET + labels,
         )
