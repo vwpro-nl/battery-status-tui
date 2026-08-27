@@ -5,8 +5,8 @@ import re
 import unittest
 
 from battery_status_tui.graph import (
-    COLUMN_SECONDS, FORECAST_SECONDS, GRAPH_OFFSET, GRAPH_WIDTH, GREEN,
-    HISTORY_SECONDS, NOW_INDEX, ORANGE, RED, TIME_COLUMNS, YELLOW,
+    COLUMN_SECONDS, FORECAST_SECONDS, GRAPH_OFFSET, GRAPH_WIDTH,
+    HISTORY_SECONDS, NOW_INDEX, TIME_COLUMNS,
     _battery_color, _chart_rows_and_percentages, _style_battery, axis_rows,
     chart_rows, column_timestamp, project_column, render_dashboard, title_line,
 )
@@ -162,13 +162,23 @@ class GraphTests(unittest.TestCase):
         self.assertTrue((top[NOW_INDEX + 1:endpoint + 1] + bottom[NOW_INDEX + 1:endpoint + 1]).strip())
         self.assertFalse((top[endpoint + 1:] + bottom[endpoint + 1:]).strip())
 
-    def test_battery_color_boundaries(self):
-        self.assertEqual(_battery_color(24.9), RED)
-        self.assertEqual(_battery_color(25.0), ORANGE)
-        self.assertEqual(_battery_color(49.9), ORANGE)
-        self.assertEqual(_battery_color(50.0), YELLOW)
-        self.assertEqual(_battery_color(74.9), YELLOW)
-        self.assertEqual(_battery_color(75.0), GREEN)
+    def test_battery_gradient_anchors_and_clamping(self):
+        expected = {
+            0: "\x1b[38;2;85;10;20m",
+            25: "\x1b[38;2;155;35;30m",
+            50: "\x1b[38;2;175;110;25m",
+            75: "\x1b[38;2;90;130;40m",
+            100: "\x1b[38;2;20;105;50m",
+        }
+        for percentage, color in expected.items():
+            self.assertEqual(_battery_color(percentage), color)
+        self.assertEqual(_battery_color(-1), expected[0])
+        self.assertEqual(_battery_color(101), expected[100])
+
+    def test_battery_gradient_interpolates_neighboring_percentages(self):
+        self.assertEqual(_battery_color(10), "\x1b[38;2;113;20;24m")
+        self.assertEqual(_battery_color(30), "\x1b[38;2;159;50;29m")
+        self.assertNotEqual(_battery_color(30), _battery_color(31))
 
     def test_history_columns_use_their_aggregated_percentages(self):
         history = [
@@ -178,17 +188,17 @@ class GraphTests(unittest.TestCase):
         ]
         top, bottom, percentages = _chart_rows_and_percentages(self.current, history, None, self.now)
         expected = {
-            project_column(stamp(19, 40), self.now): (20, RED),
-            project_column(stamp(20), self.now): (30, ORANGE),
-            project_column(stamp(20, 20), self.now): (60, YELLOW),
-            project_column(stamp(20, 40), self.now): (80, GREEN),
+            project_column(stamp(19, 40), self.now): 20,
+            project_column(stamp(20), self.now): 30,
+            project_column(stamp(20, 20), self.now): 60,
+            project_column(stamp(20, 40), self.now): 80,
         }
         styled = _style_battery(top, percentages) + _style_battery(bottom, percentages)
-        for column, (percentage, color) in expected.items():
+        for column, percentage in expected.items():
             self.assertEqual(percentages[column], percentage)
-            self.assertIn(color, styled)
+            self.assertIn(_battery_color(percentage), styled)
 
-    def test_charging_forecast_changes_from_yellow_to_green(self):
+    def test_charging_forecast_uses_changing_gradient_colors(self):
         current = Measurement(self.now, 60, "charging", True)
         top, bottom, percentages = _chart_rows_and_percentages(
             current, [], Estimate(6 * 3600, "test"), self.now
@@ -197,18 +207,19 @@ class GraphTests(unittest.TestCase):
         self.assertTrue(any(value is not None and 50 <= value < 75 for value in forecast))
         self.assertTrue(any(value is not None and value >= 75 for value in forecast))
         styled = _style_battery(top, percentages) + _style_battery(bottom, percentages)
-        self.assertIn(YELLOW, styled)
-        self.assertIn(GREEN, styled)
+        self.assertIn(_battery_color(next(value for value in forecast if value is not None)), styled)
+        self.assertIn(_battery_color(next(value for value in reversed(forecast) if value is not None)), styled)
 
-    def test_discharging_forecast_changes_from_yellow_to_orange_to_red(self):
+    def test_discharging_forecast_uses_changing_gradient_colors(self):
         current = Measurement(self.now, 60, "discharging", False)
         top, bottom, percentages = _chart_rows_and_percentages(
             current, [], Estimate(6 * 3600, "test"), self.now
         )
         styled = _style_battery(top, percentages) + _style_battery(bottom, percentages)
-        self.assertIn(YELLOW, styled)
-        self.assertIn(ORANGE, styled)
-        self.assertIn(RED, styled)
+        forecast = [value for value in percentages[NOW_INDEX + 1:] if value is not None]
+        self.assertIn(_battery_color(forecast[0]), styled)
+        self.assertIn(_battery_color(forecast[len(forecast) // 2]), styled)
+        self.assertIn(_battery_color(forecast[-1]), styled)
 
     def test_battery_colors_preserve_width_now_axis_and_sleep(self):
         sleep = SleepInterval(stamp(18), stamp(19), pre_percentage=55, post_percentage=53)

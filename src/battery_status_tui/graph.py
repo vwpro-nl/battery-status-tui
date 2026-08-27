@@ -16,12 +16,17 @@ CSI = "\x1b["
 RESET = CSI + "0m"
 BOLD = CSI + "1m"
 CYAN = CSI + "38;5;81m"
-GREEN = CSI + "38;5;114m"
 YELLOW = CSI + "38;5;221m"
-ORANGE = CSI + "38;5;208m"
-RED = CSI + "38;5;203m"
 MUTED = CSI + "38;5;244m"
 DIM = CSI + "2m"
+
+BATTERY_COLOR_STOPS = (
+    (0.0, (85, 10, 20)),
+    (25.0, (155, 35, 30)),
+    (50.0, (175, 110, 25)),
+    (75.0, (90, 130, 40)),
+    (100.0, (20, 105, 50)),
+)
 
 TIME_COLUMNS = 36
 COLUMN_SECONDS = 20 * 60
@@ -112,13 +117,18 @@ def _sleep_z_columns(columns: range) -> set[int]:
 
 
 def _battery_color(percentage: float) -> str:
-    if percentage < 25:
-        return RED
-    if percentage < 50:
-        return ORANGE
-    if percentage < 75:
-        return YELLOW
-    return GREEN
+    value = max(0.0, min(100.0, percentage))
+    for (lower_value, lower_rgb), (upper_value, upper_rgb) in zip(
+        BATTERY_COLOR_STOPS, BATTERY_COLOR_STOPS[1:]
+    ):
+        if value <= upper_value:
+            fraction = (value - lower_value) / (upper_value - lower_value)
+            red, green, blue = (
+                round(lower + (upper - lower) * fraction)
+                for lower, upper in zip(lower_rgb, upper_rgb)
+            )
+            return f"{CSI}38;2;{red};{green};{blue}m"
+    raise AssertionError("clamped battery percentage has no color segment")
 
 
 def _chart_rows_and_percentages(
