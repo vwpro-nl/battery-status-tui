@@ -169,9 +169,15 @@ class GraphTests(unittest.TestCase):
     def test_braille_fill_height_tracks_forecast_percentage(self):
         for percentage in (0, 25, 50, 75, 100):
             with self.subTest(percentage=percentage):
-                top, bottom = _braille_fill(percentage, False)
+                top, bottom = _braille_fill(percentage)
                 dots = sum((ord(character) - 0x2800).bit_count() for character in (top, bottom) if character != " ")
-                self.assertEqual(dots, round(percentage / 100 * 8))
+                self.assertEqual(dots // 2, round(percentage / 100 * 8))
+
+    def test_braille_fill_maximizes_complete_cells_and_only_partially_fills_top(self):
+        self.assertEqual(_braille_fill(50), (" ", "⣿"))
+        self.assertEqual(_braille_fill(75), ("⣤", "⣿"))
+        self.assertEqual(_braille_fill(100), ("⣿", "⣿"))
+        self.assertNotEqual(_braille_fill(75)[0], "⣿")
 
     def test_forecast_stops_at_estimated_empty(self):
         top, bottom = chart_rows(self.current, self.history, Estimate(1800, "test"), self.now)
@@ -195,10 +201,8 @@ class GraphTests(unittest.TestCase):
         current = Measurement(self.now, 100, "full", True)
         top, bottom, percentages = _chart_rows_and_percentages(current, [], None, self.now)
         self.assertTrue(all(value == 100 for value in percentages[NOW_INDEX + 1:]))
-        self.assertTrue(all(
-            0x2800 <= ord(character) <= 0x28ff
-            for character in top[NOW_INDEX + 1:] + bottom[NOW_INDEX + 1:]
-        ))
+        self.assertEqual(top[NOW_INDEX + 1:], "⣿" * (GRAPH_WIDTH - NOW_INDEX - 1))
+        self.assertEqual(bottom[NOW_INDEX + 1:], "⣿" * (GRAPH_WIDTH - NOW_INDEX - 1))
 
     def test_ac_state_rebuilds_forecast_without_stale_full_plateau(self):
         charging = Measurement(self.now, 75, "charging", True)
@@ -291,7 +295,7 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(lines[2][GRAPH_OFFSET + NOW_INDEX], "│")
         self.assertEqual(lines[3][GRAPH_OFFSET:], axis_rows(self.now)[0])
         self.assertIn("\x1b[38;5;244m\x1b[2mz", rendered)
-        self.assertNotIn("⣀", rendered)
+        self.assertNotIn("\x1b[38;5;244m\x1b[2m⣀", rendered)
 
     def test_pre_sleep_sleep_and_post_resume_segments_all_remain_visible(self):
         sleep = SleepInterval(stamp(18), stamp(20), pre_percentage=55, post_percentage=51)
