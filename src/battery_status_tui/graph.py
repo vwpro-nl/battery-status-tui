@@ -69,6 +69,13 @@ def column_timestamp(column: int, now: int) -> int:
     return (now // COLUMN_SECONDS + column - NOW_INDEX) * COLUMN_SECONDS
 
 
+def _history_column(timestamp: int, now: int) -> int | None:
+    latest_closed_bucket = now // COLUMN_SECONDS - 1
+    sample_bucket = timestamp // COLUMN_SECONDS
+    column = NOW_INDEX - 1 - (latest_closed_bucket - sample_bucket)
+    return column if sample_bucket <= latest_closed_bucket and 0 <= column < NOW_INDEX else None
+
+
 def _inside_sleep(timestamp: int, intervals: Sequence[SleepInterval]) -> bool:
     return any(interval.started_at <= timestamp < interval.ended_at for interval in intervals)
 
@@ -77,11 +84,17 @@ def _sleep_columns(interval: SleepInterval, now: int) -> range:
     first_full_bucket = (interval.started_at + COLUMN_SECONDS - 1) // COLUMN_SECONDS
     after_last_full_bucket = interval.ended_at // COLUMN_SECONDS
     if first_full_bucket < after_last_full_bucket:
-        start = NOW_INDEX + first_full_bucket - now // COLUMN_SECONDS
-        end = NOW_INDEX + after_last_full_bucket - 1 - now // COLUMN_SECONDS
+        first_bucket = first_full_bucket
+        last_bucket = after_last_full_bucket - 1
     else:
         midpoint = interval.started_at + (interval.ended_at - interval.started_at) // 2
-        start = end = project_column(midpoint, now)
+        first_bucket = last_bucket = midpoint // COLUMN_SECONDS
+    latest_closed_bucket = now // COLUMN_SECONDS - 1
+    last_bucket = min(last_bucket, latest_closed_bucket)
+    if first_bucket > last_bucket:
+        return range(0)
+    start = NOW_INDEX - 1 - (latest_closed_bucket - first_bucket)
+    end = NOW_INDEX - 1 - (latest_closed_bucket - last_bucket)
     start = max(0, min(NOW_INDEX - 1, start))
     end = max(start, min(NOW_INDEX - 1, end))
     return range(start, end + 1)
@@ -89,6 +102,8 @@ def _sleep_columns(interval: SleepInterval, now: int) -> range:
 
 def _sleep_z_columns(columns: range) -> set[int]:
     width = len(columns)
+    if width == 0:
+        return set()
     count = max(1, math.ceil(width / 4))
     return {columns.start + (2 * index + 1) * width // (2 * count) for index in range(count)}
 
@@ -105,8 +120,8 @@ def chart_rows(
     buckets: dict[int, list[float]] = defaultdict(list)
     for sample in history:
         if now - HISTORY_SECONDS <= sample.timestamp < now and not _inside_sleep(sample.timestamp, sleep_intervals):
-            column = project_column(sample.timestamp, now)
-            if 0 <= column < NOW_INDEX:
+            column = _history_column(sample.timestamp, now)
+            if column is not None:
                 buckets[column].append(sample.percentage)
     for column, percentages in buckets.items():
         top[column], bottom[column] = _fill_chars(statistics.median(percentages))

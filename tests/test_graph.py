@@ -64,6 +64,29 @@ class GraphTests(unittest.TestCase):
                             if top[index] != " " or bottom[index] != " "]
                 self.assertEqual(occupied, [occupied_column])
 
+    def test_current_bucket_is_hidden_until_it_closes(self):
+        history = [sample(stamp(22, 0), 80), sample(stamp(22, 19), 70)]
+        before_top, before_bottom = chart_rows(sample(stamp(22, 19)), history, None, stamp(22, 19))
+        after_top, after_bottom = chart_rows(sample(stamp(22, 20)), history, None, stamp(22, 20))
+        self.assertEqual((before_top[NOW_INDEX - 1], before_bottom[NOW_INDEX - 1]), (" ", " "))
+        self.assertNotEqual((after_top[NOW_INDEX - 1], after_bottom[NOW_INDEX - 1]), (" ", " "))
+
+    def test_now_column_is_exclusively_the_marker(self):
+        now = stamp(22, 19)
+        history = [sample(now, 80)]
+        sleep = SleepInterval(stamp(22, 10), stamp(22, 18), pre_percentage=80, post_percentage=79)
+        top, bottom = chart_rows(sample(now), history, Estimate(3600, "test"), now, [sleep])
+        self.assertEqual((top[NOW_INDEX], bottom[NOW_INDEX]), ("│", "│"))
+        self.assertNotIn("⣀", top[NOW_INDEX:NOW_INDEX + 1])
+        self.assertNotIn("z", bottom[NOW_INDEX:NOW_INDEX + 1])
+
+    def test_unclosed_sleep_bucket_is_not_moved_into_history(self):
+        now = stamp(22, 19)
+        sleep = SleepInterval(stamp(22, 10), stamp(22, 18), pre_percentage=80, post_percentage=79)
+        top, bottom = chart_rows(sample(now), [], None, now, [sleep])
+        self.assertNotIn("⣀", top[:NOW_INDEX])
+        self.assertNotIn("z", bottom[:NOW_INDEX])
+
     def test_column_inverse_uses_same_projection(self):
         now = stamp(20, 19)
         for column in range(GRAPH_WIDTH):
