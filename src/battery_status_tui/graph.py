@@ -170,14 +170,27 @@ def axis_rows(now: int) -> tuple[str, str]:
     first_visible = column_timestamp(-1, now)
     last_visible = column_timestamp(GRAPH_WIDTH, now)
     timestamp = first_visible // TICK_SECONDS * TICK_SECONDS
+    normal_marks: list[tuple[int, int]] = []
     while timestamp <= last_visible:
         position = project_column(timestamp, now)
+        normal_marks.append((timestamp, position))
         if 0 <= position < GRAPH_WIDTH:
             axis[position] = "┬"
         label = dt.datetime.fromtimestamp(timestamp).astimezone().strftime("%H")
         if 0 <= position and position + len(label) <= GRAPH_WIDTH:
             _put(labels, position, label)
         timestamp += TICK_SECONDS
+    left_mark = max((mark for mark in normal_marks if mark[1] <= 0), default=None)
+    if left_mark is not None and not (0 <= left_mark[1] and left_mark[1] + 2 <= GRAPH_WIDTH):
+        boundary = dt.datetime.fromtimestamp(column_timestamp(0, now)).astimezone()
+        candidate = boundary.replace(minute=0, second=0, microsecond=0)
+        if candidate < boundary:
+            candidate += dt.timedelta(hours=1)
+        candidate_timestamp = int(candidate.timestamp())
+        position = project_column(candidate_timestamp, now)
+        if candidate_timestamp not in {mark[0] for mark in normal_marks} and 0 <= position and position + 2 <= GRAPH_WIDTH:
+            axis[position] = "┬"
+            _put(labels, position, candidate.strftime("%H"))
     return "".join(axis), "".join(labels).rstrip()
 
 
@@ -209,18 +222,25 @@ def render_dashboard(
 ) -> str:
     top, bottom = chart_rows(current, history, estimate, now, sleep_intervals)
     elapsed = None if session is None else max(0, now - session.started_at)
-    left_label = format_duration(elapsed).rjust(GRAPH_OFFSET - 1) + " "
+    left_label = format_duration(elapsed).ljust(GRAPH_OFFSET)
     if estimate is None:
         right_label = "--"
     else:
         end_time = dt.datetime.fromtimestamp(now + estimate.seconds).astimezone().strftime("%H:%M")
         right_label = f"{format_duration(estimate.seconds)} ~{end_time}"
     axis, labels = axis_rows(now)
+    meanings = [" "] * (GRAPH_OFFSET + GRAPH_WIDTH + 1 + len(right_label))
+    if elapsed is not None:
+        _put(meanings, 0, "start")
+    if estimate is not None and current.session_kind in {"charging", "discharging"}:
+        _put(meanings, GRAPH_OFFSET + GRAPH_WIDTH + 1,
+             "full" if current.session_kind == "charging" else "empty")
     return "\n".join(
         (
             title_line(current),
             " " * GRAPH_OFFSET + _style_sleep(top),
             f"{MUTED}{left_label}{RESET}{_style_sleep(bottom)} {DIM}{right_label}{RESET}",
+            f"{MUTED}{DIM}{''.join(meanings).rstrip()}{RESET}",
             " " * GRAPH_OFFSET + axis,
             " " * GRAPH_OFFSET + labels,
         )

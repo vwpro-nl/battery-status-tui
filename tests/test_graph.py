@@ -96,9 +96,9 @@ class GraphTests(unittest.TestCase):
         midnight = stamp(23) + 3600
         expected = {
             stamp(23): ([0, 9, 18, 27, 36], "17       20       23       02"),
-            stamp(23, 20): ([8, 17, 26, 35], "        20       23       02       05"),
-            stamp(23, 40): ([7, 16, 25, 34], "       20       23       02       05"),
-            midnight: ([6, 15, 24, 33], "      20       23       02       05"),
+            stamp(23, 20): ([2, 8, 17, 26, 35], "  18    20       23       02       05"),
+            stamp(23, 40): ([1, 7, 16, 25, 34], " 18    20       23       02       05"),
+            midnight: ([0, 6, 15, 24, 33], "18    20       23       02       05"),
         }
         for now, (ticks, labels) in expected.items():
             with self.subTest(now=now):
@@ -116,6 +116,14 @@ class GraphTests(unittest.TestCase):
         position = project_column(stamp(20), stamp(23, 20))
         self.assertEqual(labels[position:position + 2], "20")
         self.assertEqual(axis[position], "┬")
+
+    def test_first_complete_hour_fills_left_edge_at_its_real_position(self):
+        axis, labels = axis_rows(stamp(23, 20))
+        position = project_column(stamp(18), stamp(23, 20))
+        self.assertEqual(position, 2)
+        self.assertEqual(labels[position:position + 2], "18")
+        self.assertEqual(axis[position], "┬")
+        self.assertEqual(axis.count("┬"), 5)
 
     def test_absolute_tick_and_graph_data_use_same_projection(self):
         fixed = stamp(23)
@@ -195,8 +203,10 @@ class GraphTests(unittest.TestCase):
         session = Session(1, "discharging", stamp(20), None, 55, None)
         rendered = render_dashboard(self.current, self.history, session, Estimate(7200, "test"), self.now, [sleep])
         lines = plain(rendered).splitlines()
-        self.assertEqual(len(lines), 5)
+        self.assertEqual(len(lines), 6)
         self.assertIn("1h00", lines[2])
+        self.assertTrue(lines[2].startswith("1h00"))
+        self.assertTrue(lines[3].startswith("start"))
         self.assertIn("⣀⣀⣀", lines[1])
         self.assertIn("z", lines[2])
         self.assertIn("\x1b[2m", rendered)
@@ -205,7 +215,25 @@ class GraphTests(unittest.TestCase):
         eta_start = GRAPH_OFFSET + GRAPH_WIDTH + 1
         self.assertEqual(lines[2][GRAPH_OFFSET + GRAPH_WIDTH], " ")
         self.assertEqual(lines[2][eta_start:], "2h00 ~23:00")
+        self.assertEqual(lines[3][eta_start:], "empty")
+        self.assertIn("┬", lines[4])
         self.assertEqual(max(len(line) for line in lines), 55)
+
+    def test_meaning_labels_are_conditional(self):
+        estimate = Estimate(3600, "test")
+        discharge = render_dashboard(self.current, self.history, None, estimate, self.now)
+        discharge_meanings = plain(discharge).splitlines()[3]
+        self.assertNotIn("start", discharge_meanings)
+        self.assertIn("empty", discharge_meanings)
+
+        session = Session(1, "discharging", stamp(20), None, 55, None)
+        no_eta_meanings = plain(render_dashboard(self.current, self.history, session, None, self.now)).splitlines()[3]
+        self.assertEqual(no_eta_meanings, "start")
+
+        charging = Measurement(self.now, 48, "charging", True)
+        charging_meanings = plain(render_dashboard(charging, self.history, session, estimate, self.now)).splitlines()[3]
+        self.assertNotIn("empty", charging_meanings)
+        self.assertEqual(charging_meanings[GRAPH_OFFSET + GRAPH_WIDTH + 1:], "full")
 
     def test_approximate_power_has_tilde(self):
         current = Measurement(self.now, 48, "discharging", False, power_w=7.2, power_approximate=True)
