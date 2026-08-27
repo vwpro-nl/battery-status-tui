@@ -95,8 +95,8 @@ class GraphTests(unittest.TestCase):
     def test_axis_ticks_and_labels_follow_the_twenty_minute_projection(self):
         midnight = stamp(23) + 3600
         expected = {
-            stamp(23): ([0, 9, 18, 27, 36], "17       20       23       02       0"),
-            stamp(23, 20): ([8, 17, 26, 35], "7       20       23       02       05"),
+            stamp(23): ([0, 9, 18, 27, 36], "17       20       23       02"),
+            stamp(23, 20): ([8, 17, 26, 35], "        20       23       02       05"),
             stamp(23, 40): ([7, 16, 25, 34], "       20       23       02       05"),
             midnight: ([6, 15, 24, 33], "      20       23       02       05"),
         }
@@ -106,12 +106,16 @@ class GraphTests(unittest.TestCase):
                 self.assertEqual([index for index, character in enumerate(axis) if character == "┬"], ticks)
                 self.assertEqual(rendered, labels)
 
-    def test_axis_clips_labels_and_admits_new_right_label(self):
+    def test_axis_omits_partial_labels_and_admits_complete_right_label(self):
         self.assertNotIn("05", axis_rows(stamp(22, 40))[1])
-        self.assertTrue(axis_rows(stamp(23))[1].endswith("0"))
+        self.assertNotIn("05", axis_rows(stamp(23))[1])
         self.assertTrue(axis_rows(stamp(23, 20))[1].endswith("05"))
-        self.assertTrue(axis_rows(stamp(23, 20))[1].startswith("7"))
+        self.assertFalse(axis_rows(stamp(23, 20))[1].startswith("7"))
         self.assertFalse(axis_rows(stamp(23, 40))[1].startswith("17"))
+        axis, labels = axis_rows(stamp(23, 20))
+        position = project_column(stamp(20), stamp(23, 20))
+        self.assertEqual(labels[position:position + 2], "20")
+        self.assertEqual(axis[position], "┬")
 
     def test_absolute_tick_and_graph_data_use_same_projection(self):
         fixed = stamp(23)

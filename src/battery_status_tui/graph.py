@@ -175,7 +175,8 @@ def axis_rows(now: int) -> tuple[str, str]:
         if 0 <= position < GRAPH_WIDTH:
             axis[position] = "┬"
         label = dt.datetime.fromtimestamp(timestamp).astimezone().strftime("%H")
-        _put(labels, position, label)
+        if 0 <= position and position + len(label) <= GRAPH_WIDTH:
+            _put(labels, position, label)
         timestamp += TICK_SECONDS
     return "".join(axis), "".join(labels).rstrip()
 
