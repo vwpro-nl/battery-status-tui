@@ -225,16 +225,21 @@ class Storage:
                 row = db.execute("SELECT percentage FROM samples WHERE timestamp >= ? ORDER BY timestamp LIMIT 1",
                                  (interval.ended_at,)).fetchone()
                 post_percentage = row["percentage"] if row else None
-            overlap = db.execute("""SELECT id, started_at, ended_at, pre_percentage, post_percentage
+            overlap = db.execute("""SELECT id, started_at, ended_at, source, pre_percentage, post_percentage
                 FROM sleep_intervals WHERE started_at <= ? AND ended_at >= ?
                 AND (boot_id = ? OR boot_id IS NULL OR ? IS NULL) ORDER BY id LIMIT 1""",
                 (interval.ended_at + 10, interval.started_at - 10, interval.boot_id, interval.boot_id)).fetchone()
             if overlap:
+                priority = {"clocks": 1, "journal": 2, "logind": 3}
+                use_new_bounds = priority.get(interval.source, 0) > priority.get(overlap["source"], 0)
+                started_at = interval.started_at if use_new_bounds else overlap["started_at"]
+                ended_at = interval.ended_at if use_new_bounds else overlap["ended_at"]
+                source = interval.source if use_new_bounds else overlap["source"]
                 db.execute("""UPDATE sleep_intervals SET started_at = ?, ended_at = ?, kind = ?, source = ?,
                     boot_id = COALESCE(boot_id, ?), pre_percentage = COALESCE(pre_percentage, ?),
                     post_percentage = COALESCE(?, post_percentage) WHERE id = ?""",
-                    (min(interval.started_at, overlap["started_at"]), max(interval.ended_at, overlap["ended_at"]),
-                     interval.kind, interval.source, interval.boot_id, pre_percentage, post_percentage, overlap["id"]))
+                    (started_at, ended_at, interval.kind, source, interval.boot_id,
+                     pre_percentage, post_percentage, overlap["id"]))
                 return
             db.execute("""INSERT INTO sleep_intervals(started_at, ended_at, kind, source, boot_id,
                 pre_percentage, post_percentage) VALUES (?, ?, ?, ?, ?, ?, ?)

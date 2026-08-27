@@ -71,7 +71,8 @@ class StorageTests(unittest.TestCase):
             storage.record_sleep(SleepInterval(102, 202, source="clocks", post_percentage=49))
             intervals = storage.sleep_intervals_since(0)
             self.assertEqual(len(intervals), 1)
-            self.assertEqual((intervals[0].started_at, intervals[0].ended_at), (100, 202))
+            self.assertEqual((intervals[0].started_at, intervals[0].ended_at), (100, 200))
+            self.assertEqual(intervals[0].source, "journal")
 
 
 if __name__ == "__main__":
