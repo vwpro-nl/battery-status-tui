@@ -28,12 +28,14 @@ class Measurement:
 
     @property
     def session_kind(self) -> str | None:
-        if self.state in ACTIVE_STATES:
-            return self.state
         if self.ac_online is False:
             return "discharging"
-        if self.ac_online is True and self.percentage < 100:
-            return "charging"
+        if self.ac_online is True:
+            if self.state == "charging" or self.percentage < 100:
+                return "charging"
+            return None
+        if self.state in ACTIVE_STATES:
+            return self.state
         return None
 
     @property
@@ -66,4 +68,3 @@ class Estimate:
     seconds: int
     source: str
     slope_percent_per_hour: float | None = None
-

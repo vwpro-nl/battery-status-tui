@@ -29,7 +29,14 @@ class StorageTests(unittest.TestCase):
             storage.record(measurement(160, 100, "full", True))
             self.assertIsNone(storage.current_session())
 
+    def test_ac_transition_wins_over_lagging_device_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "history.sqlite3")
+            discharge_id = storage.record(measurement(100, 80, "discharging", False))
+            charge_id = storage.record(measurement(160, 80, "discharging", True))
+            self.assertNotEqual(charge_id, discharge_id)
+            self.assertEqual(storage.current_session().kind, "charging")
+
 
 if __name__ == "__main__":
     unittest.main()
-
