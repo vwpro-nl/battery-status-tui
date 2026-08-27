@@ -167,14 +167,22 @@ def _chart_rows_and_percentages(
     top[NOW_INDEX] = "│"
     bottom[NOW_INDEX] = "│"
     kind = current.session_kind
-    if estimate is not None and kind in {"charging", "discharging"}:
-        endpoint = min(now + estimate.seconds, now + FORECAST_SECONDS)
+    full_on_ac = current.ac_online is True and (
+        current.state in {"full", "charged", "fully-charged"} or current.percentage >= 100
+    )
+    if full_on_ac or estimate is not None and kind in {"charging", "discharging"}:
+        endpoint = now + FORECAST_SECONDS if full_on_ac or kind == "charging" else min(
+            now + estimate.seconds, now + FORECAST_SECONDS
+        )
         last_column = min(GRAPH_WIDTH - 1, project_column(endpoint, now))
         for column in range(NOW_INDEX + 1, min(GRAPH_WIDTH, last_column + 1)):
-            elapsed = column_timestamp(column, now) - now
-            fraction = min(1.0, elapsed / estimate.seconds)
-            target = 100.0 if kind == "charging" else 0.0
-            percentage = current.percentage + (target - current.percentage) * fraction
+            if full_on_ac:
+                percentage = 100.0
+            else:
+                elapsed = column_timestamp(column, now) - now
+                fraction = min(1.0, elapsed / estimate.seconds)
+                target = 100.0 if kind == "charging" else 0.0
+                percentage = current.percentage + (target - current.percentage) * fraction
             forecast_top, forecast_bottom = _braille_fill(percentage, column % 2 == 0)
             top[column] = forecast_top
             bottom[column] = forecast_bottom

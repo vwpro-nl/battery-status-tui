@@ -179,6 +179,47 @@ class GraphTests(unittest.TestCase):
         self.assertTrue((top[NOW_INDEX + 1:endpoint + 1] + bottom[NOW_INDEX + 1:endpoint + 1]).strip())
         self.assertFalse((top[endpoint + 1:] + bottom[endpoint + 1:]).strip())
 
+    def test_charging_forecast_reaches_full_then_plateaus_to_six_hours(self):
+        current = Measurement(self.now, 75, "charging", True)
+        estimate = Estimate(3600, "test")
+        top, bottom, percentages = _chart_rows_and_percentages(current, [], estimate, self.now)
+        full_column = project_column(self.now + estimate.seconds, self.now)
+        self.assertLess(percentages[NOW_INDEX + 1], 100)
+        self.assertEqual(percentages[full_column], 100)
+        self.assertTrue(all(value == 100 for value in percentages[full_column:]))
+        self.assertEqual(percentages[-1], 100)
+        styled = _style_battery(top, percentages) + _style_battery(bottom, percentages)
+        self.assertIn(_battery_color(100), styled)
+
+    def test_full_battery_on_ac_has_full_window_plateau_without_eta(self):
+        current = Measurement(self.now, 100, "full", True)
+        top, bottom, percentages = _chart_rows_and_percentages(current, [], None, self.now)
+        self.assertTrue(all(value == 100 for value in percentages[NOW_INDEX + 1:]))
+        self.assertTrue(all(
+            0x2800 <= ord(character) <= 0x28ff
+            for character in top[NOW_INDEX + 1:] + bottom[NOW_INDEX + 1:]
+        ))
+
+    def test_ac_state_rebuilds_forecast_without_stale_full_plateau(self):
+        charging = Measurement(self.now, 75, "charging", True)
+        _, _, charging_percentages = _chart_rows_and_percentages(
+            charging, [], Estimate(3600, "test"), self.now
+        )
+        self.assertEqual(charging_percentages[-1], 100)
+
+        discharging = Measurement(self.now, 75, "discharging", False)
+        _, _, discharge_percentages = _chart_rows_and_percentages(
+            discharging, [], Estimate(3600, "test"), self.now
+        )
+        discharge_endpoint = project_column(self.now + 3600, self.now)
+        self.assertEqual(discharge_percentages[discharge_endpoint], 0)
+        self.assertTrue(all(value is None for value in discharge_percentages[discharge_endpoint + 1:]))
+
+        _, _, recharging_percentages = _chart_rows_and_percentages(
+            charging, [], Estimate(3600, "test"), self.now
+        )
+        self.assertEqual(recharging_percentages[-1], 100)
+
     def test_battery_gradient_anchors_and_clamping(self):
         expected = {
             0: "\x1b[38;2;85;10;20m",
