@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from battery_status_tui.sources import SysfsSource, UPowerSource
+from battery_status_tui.sources import BatterySource, SysfsSource, UPowerSource
 
 
 UPOWER_DUMP = """Device: /org/freedesktop/UPower/devices/battery_BAT0
@@ -57,6 +57,32 @@ class SourceTests(unittest.TestCase):
         self.assertAlmostEqual(measurement.power_w or 0, 8.4)
         self.assertFalse(measurement.ac_online)
 
+    def test_field_fusion_rejects_upower_zero_and_keeps_sysfs_counters(self):
+        dump = UPOWER_DUMP.replace("energy-rate:         8.4 W", "energy-rate:         0 W")
+        class ZeroResult(Result):
+            stdout = dump
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._supply(root / "BAT0", type="Battery", capacity="48", status="Discharging",
+                         charge_now="2000000", charge_full="4000000", voltage_now="12000000")
+            source = BatterySource(UPowerSource(lambda *args, **kwargs: ZeroResult()), SysfsSource(root))
+            raw = source.read_raw(100)[0]
+        self.assertEqual(raw.charge_now_ah, 2)
+        self.assertIsNone(raw.upower_energy_rate_w)
+        self.assertEqual(raw.sources, ("sysfs", "upower"))
+
+    def test_multiple_system_batteries_are_aggregated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._supply(root / "BAT0", type="Battery", capacity="50", status="Discharging",
+                         energy_now="20000000", energy_full="40000000", power_now="5000000")
+            self._supply(root / "BAT1", type="Battery", capacity="25", status="Discharging",
+                         energy_now="10000000", energy_full="40000000", power_now="3000000")
+            measurement = SysfsSource(root).read(100)
+        self.assertEqual(measurement.device, "BAT0,BAT1")
+        self.assertEqual(measurement.percentage, 37.5)
+        self.assertEqual(measurement.power_w, 8)
+
     @staticmethod
     def _supply(path: Path, **values: str) -> None:
         path.mkdir()
@@ -66,4 +92,3 @@ class SourceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
