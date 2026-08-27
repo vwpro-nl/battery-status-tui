@@ -12,7 +12,7 @@ widget.
 ## Design goals
 
 - Python standard library only.
-- UPower D-Bus as the primary source, with `/sys/class/power_supply` fallback.
+- Field-level fusion of `/sys/class/power_supply` and UPower data.
 - SQLite history in the user's XDG state directory.
 - Robust session-based ETA rather than blindly trusting an instantaneous rate.
 - Two terminal rows for the 0–100% graph: solid history and fine Braille forecast.
@@ -87,9 +87,10 @@ python3 -m compileall -q src tests
 git diff --check
 ```
 
-The suite covers source selection, sysfs power calculation, session boundaries,
-robust charging/discharging trends, ETA fallback and smoothing, forecast
-termination, and the shared Unicode `NOW` alignment.
+The suite covers energy- and charge-based batteries, multi-battery aggregation,
+source priority and invalid zeroes, counter resets and replacement batteries,
+schema migration, suspend reconstruction, sleep gaps, session boundaries,
+charging/discharging trends, forecast termination, and Unicode `NOW` alignment.
 
 ## Documentation
 

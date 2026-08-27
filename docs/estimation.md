@@ -3,6 +3,7 @@
 The primary ETA is derived from the current charging or discharging session:
 
 1. Use at most the most recent 60 minutes.
+   Samples before the latest suspend/resume boundary are excluded.
 2. Collapse observations into five-minute buckets using the median percentage.
 3. Require four buckets, at least 15 minutes and at least one percentage point
    of movement.
@@ -25,3 +26,8 @@ Fallback order when the trend is not mature enough:
 The forecast renderer uses the selected ETA only to reach the relevant physical
 boundary. It never reverses direction and never extends a completed forecast
 artificially to the right edge of the six-hour future window.
+
+Power estimation is separate from ETA estimation. A temporal Watt value uses
+raw energy or charge counters and becomes eligible after 120 seconds. The
+resolver can extend its observation window to ten minutes for coarse counters,
+uses the median of valid deltas, and never spans a recorded sleep interval.
