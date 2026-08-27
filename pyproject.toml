@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "battery-status-tui"
+version = "0.1.0"
+description = "Compact battery history and forecast TUI for Linux"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Wim van Weert" }]
+dependencies = []
+
+[project.scripts]
+battery-status-tui = "battery_status_tui.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
