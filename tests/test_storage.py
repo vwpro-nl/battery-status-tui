@@ -57,6 +57,22 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(storage.raw_samples_since(0)[0].charge_now_ah, 2)
             self.assertEqual(storage.sleep_intervals_since(0)[0].post_percentage, 49)
 
+    def test_battery_replacement_starts_new_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "history.sqlite3")
+            first = Measurement(100, 50, "discharging", False, battery_identity="old")
+            replacement = Measurement(160, 50, "discharging", False, battery_identity="new")
+            self.assertNotEqual(storage.record(first), storage.record(replacement))
+
+    def test_overlapping_sleep_sources_are_merged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "history.sqlite3")
+            storage.record_sleep(SleepInterval(100, 200, source="journal"))
+            storage.record_sleep(SleepInterval(102, 202, source="clocks", post_percentage=49))
+            intervals = storage.sleep_intervals_since(0)
+            self.assertEqual(len(intervals), 1)
+            self.assertEqual((intervals[0].started_at, intervals[0].ended_at), (100, 202))
+
 
 if __name__ == "__main__":
     unittest.main()

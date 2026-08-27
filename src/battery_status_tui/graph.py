@@ -56,6 +56,10 @@ def _braille_point(percentage: float, right_dot: bool) -> tuple[str, str]:
         return glyphs[position], " "
     return " ", glyphs[position - 4]
 
+def _sleep_level(percentage: float) -> tuple[int, str]:
+    position = max(0, min(7, round((100 - percentage) / 100 * 7)))
+    return (0 if position < 4 else 1), ("⠉", "⠒", "⠤", "⣀")[position % 4]
+
 
 def _interpolate(samples: Sequence[Measurement], timestamp: int) -> float | None:
     if not samples or timestamp < samples[0].timestamp:
@@ -94,9 +98,8 @@ def chart_rows(
         end = min(NOW_INDEX - 1, max(start, round((interval.ended_at - (now - HISTORY_SECONDS)) / HISTORY_SECONDS * NOW_INDEX)))
         if end < 0 or start >= NOW_INDEX or interval.pre_percentage is None:
             continue
-        point_top, point_bottom = _braille_point(interval.pre_percentage, False)
-        sleep_row = top if point_top.strip() else bottom
-        glyph = "⠒" if point_top.strip() else "⠤"
+        row_index, glyph = _sleep_level(interval.pre_percentage)
+        sleep_row = top if row_index == 0 else bottom
         for column in range(max(0, start), end + 1):
             sleep_row[column] = glyph
         for column in range(max(0, start + (end - start) // 2), end + 1, 7):

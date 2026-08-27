@@ -24,6 +24,15 @@ JOIN   : ███▇▆▅│⠴⠦⠤⠒⠂⠁
 HEIGHT : ⠀ ⡀ ⣀ ⣄ ⣤ ⣦ ⣶ ⣿
 AXIS   : ┬─────┬─────┬─────┬─────┬"""
 
+def reconcile_journal(storage: Storage, now: int) -> None:
+    checked = storage.metadata_int("journal-checked-at")
+    if checked is not None and now - checked < 3600:
+        return
+    since = max(now - 7 * 3600, (checked or 0) - 60)
+    for interval in journal_intervals(since):
+        storage.record_sleep(interval)
+    storage.set_metadata_int("journal-checked-at", now)
+
 
 def collect(source: BatterySource, storage: Storage, now: int | None = None) -> Measurement:
     timestamp = int(time.time()) if now is None else now
@@ -47,6 +56,9 @@ def current_estimate(storage: Storage, current: Measurement, now: int) -> Estima
     if session is None:
         return None
     samples = storage.samples_since(max(session.started_at, now - 3600), session.id)
+    sleeps = storage.sleep_intervals_since(max(session.started_at, now - 3600))
+    if sleeps:
+        samples = [sample for sample in samples if sample.timestamp >= sleeps[-1].ended_at]
     estimate = estimate_remaining(current, samples, now)
     if estimate is None:
         return None
@@ -74,8 +86,7 @@ def diagnostic_text(measurement: Measurement, storage: Storage) -> str:
     def value(number: float | int | None, suffix: str = "") -> str:
         return "unavailable" if number is None else f"{number}{suffix}"
 
-    return "\n".join(
-        (
+    lines = [
             f"battery-status-tui {__version__}",
             f"source: {measurement.source}",
             f"device: {measurement.device}",
@@ -100,8 +111,19 @@ def diagnostic_text(measurement: Measurement, storage: Storage) -> str:
             f"battery identity: {measurement.battery_identity or 'unavailable'}",
             f"system batteries: {len(measurement.raw_batteries)}",
             f"database: {storage.path}",
-        )
-    )
+    ]
+    for item in measurement.raw_batteries:
+        lines.extend((
+            f"[{item.device}] identity: {item.identity}",
+            f"[{item.device}] sources: {','.join(item.sources)}",
+            f"[{item.device}] power_now: {value(item.power_now_w, ' W')}",
+            f"[{item.device}] current_now: {value(item.current_now_a, ' A')}",
+            f"[{item.device}] voltage_now: {value(item.voltage_now_v, ' V')}",
+            f"[{item.device}] energy_now: {value(item.energy_now_wh, ' Wh')}",
+            f"[{item.device}] charge_now: {value(item.charge_now_ah, ' Ah')}",
+            f"[{item.device}] UPower EnergyRate: {value(item.upower_energy_rate_w, ' W')}",
+        ))
+    return "\n".join(lines)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -125,6 +147,7 @@ def main(argv: list[str] | None = None) -> int:
 
     source = BatterySource()
     storage = Storage(args.database)
+    reconcile_journal(storage, int(time.time()))
     try:
         if args.sample:
             measurement = collect(source, storage)
@@ -152,8 +175,6 @@ def main(argv: list[str] | None = None) -> int:
 
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
-    for interval in journal_intervals(int(time.time()) - 7 * 3600):
-        storage.record_sleep(interval)
     monitor = LogindMonitor()
     monitor.start()
     sleep_started: int | None = None
@@ -173,6 +194,10 @@ def main(argv: list[str] | None = None) -> int:
                 for sleeping, event_time in monitor.drain():
                     if sleeping:
                         sleep_started = event_time
+                        try:
+                            collect(source, storage, event_time)
+                        except SourceUnavailable:
+                            pass
                     elif sleep_started is not None:
                         latest = storage.latest()
                         storage.record_sleep(SleepInterval(sleep_started, event_time, source="logind",

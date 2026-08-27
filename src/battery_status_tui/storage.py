@@ -158,7 +158,12 @@ class Storage:
                     upower_remaining_s=excluded.upower_remaining_s,
                     source=excluded.source, power_method=excluded.power_method,
                     power_approximate=excluded.power_approximate,
-                    power_confidence=excluded.power_confidence, power_window_s=excluded.power_window_s
+                    power_confidence=excluded.power_confidence, power_window_s=excluded.power_window_s,
+                    energy_wh=excluded.energy_wh, energy_full_wh=excluded.energy_full_wh,
+                    energy_full_design_wh=excluded.energy_full_design_wh, charge_ah=excluded.charge_ah,
+                    charge_full_ah=excluded.charge_full_ah, charge_full_design_ah=excluded.charge_full_design_ah,
+                    monotonic_s=excluded.monotonic_s, boottime_s=excluded.boottime_s,
+                    boot_id=excluded.boot_id, battery_identity=excluded.battery_identity
                 """,
                 (
                     measurement.timestamp,
@@ -210,13 +215,34 @@ class Storage:
 
     def record_sleep(self, interval: SleepInterval) -> None:
         with self.connect() as db:
+            pre_percentage = interval.pre_percentage
+            post_percentage = interval.post_percentage
+            if pre_percentage is None:
+                row = db.execute("SELECT percentage FROM samples WHERE timestamp <= ? ORDER BY timestamp DESC LIMIT 1",
+                                 (interval.started_at,)).fetchone()
+                pre_percentage = row["percentage"] if row else None
+            if post_percentage is None:
+                row = db.execute("SELECT percentage FROM samples WHERE timestamp >= ? ORDER BY timestamp LIMIT 1",
+                                 (interval.ended_at,)).fetchone()
+                post_percentage = row["percentage"] if row else None
+            overlap = db.execute("""SELECT id, started_at, ended_at, pre_percentage, post_percentage
+                FROM sleep_intervals WHERE started_at <= ? AND ended_at >= ?
+                AND (boot_id = ? OR boot_id IS NULL OR ? IS NULL) ORDER BY id LIMIT 1""",
+                (interval.ended_at + 10, interval.started_at - 10, interval.boot_id, interval.boot_id)).fetchone()
+            if overlap:
+                db.execute("""UPDATE sleep_intervals SET started_at = ?, ended_at = ?, kind = ?, source = ?,
+                    boot_id = COALESCE(boot_id, ?), pre_percentage = COALESCE(pre_percentage, ?),
+                    post_percentage = COALESCE(?, post_percentage) WHERE id = ?""",
+                    (min(interval.started_at, overlap["started_at"]), max(interval.ended_at, overlap["ended_at"]),
+                     interval.kind, interval.source, interval.boot_id, pre_percentage, post_percentage, overlap["id"]))
+                return
             db.execute("""INSERT INTO sleep_intervals(started_at, ended_at, kind, source, boot_id,
                 pre_percentage, post_percentage) VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(started_at, ended_at) DO UPDATE SET source=excluded.source,
                 pre_percentage=COALESCE(excluded.pre_percentage, pre_percentage),
                 post_percentage=COALESCE(excluded.post_percentage, post_percentage)""",
                 (interval.started_at, interval.ended_at, interval.kind, interval.source, interval.boot_id,
-                 interval.pre_percentage, interval.post_percentage))
+                 pre_percentage, post_percentage))
 
     def sleep_intervals_since(self, timestamp: int) -> list[SleepInterval]:
         with self.connect() as db:
@@ -251,6 +277,8 @@ class Storage:
         cutoff = before if before is not None else int(time.time()) - 30 * 86400
         with self.connect() as db:
             cursor = db.execute("DELETE FROM samples WHERE timestamp < ?", (cutoff,))
+            db.execute("DELETE FROM battery_samples WHERE timestamp < ?", (cutoff,))
+            db.execute("DELETE FROM sleep_intervals WHERE ended_at < ?", (cutoff,))
             return cursor.rowcount
 
     def metadata_int(self, key: str) -> int | None:
