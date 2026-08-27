@@ -37,8 +37,8 @@ FORECAST_SECONDS = 6 * 3600
 TICK_SECONDS = 3600
 GRAPH_OFFSET = 6
 BLOCKS = " ▁▂▃▄▅▆▇█"
-BRAILLE_LEFT = ("⠁", "⠂", "⠄", "⡀")
-BRAILLE_RIGHT = ("⠈", "⠐", "⠠", "⢀")
+BRAILLE_LEFT_BOTTOM_UP = (0x40, 0x04, 0x02, 0x01)
+BRAILLE_RIGHT_BOTTOM_UP = (0x80, 0x20, 0x10, 0x08)
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -60,12 +60,14 @@ def _fill_chars(percentage: float) -> tuple[str, str]:
     return top, bottom
 
 
-def _braille_point(percentage: float, right_dot: bool) -> tuple[str, str]:
-    position = max(0, min(7, round((100 - percentage) / 100 * 7)))
-    glyphs = BRAILLE_RIGHT if right_dot else BRAILLE_LEFT
-    if position < 4:
-        return glyphs[position], " "
-    return " ", glyphs[position - 4]
+def _braille_fill(percentage: float, right_dots: bool) -> tuple[str, str]:
+    levels = max(0, min(8, round(percentage / 100 * 8)))
+    dots = BRAILLE_RIGHT_BOTTOM_UP if right_dots else BRAILLE_LEFT_BOTTOM_UP
+
+    def glyph(count: int) -> str:
+        return " " if count == 0 else chr(0x2800 + sum(dots[:count]))
+
+    return glyph(max(0, levels - 4)), glyph(min(4, levels))
 
 def project_column(timestamp: int, now: int) -> int:
     """Project an exact timestamp onto the shared 20-minute display grid."""
@@ -158,7 +160,7 @@ def _chart_rows_and_percentages(
         columns = _sleep_columns(interval, now)
         z_columns = _sleep_z_columns(columns)
         for column in columns:
-            top[column] = "⣀"
+            top[column] = " "
             bottom[column] = "z" if column in z_columns else " "
             percentages_by_column[column] = None
 
@@ -173,7 +175,7 @@ def _chart_rows_and_percentages(
             fraction = min(1.0, elapsed / estimate.seconds)
             target = 100.0 if kind == "charging" else 0.0
             percentage = current.percentage + (target - current.percentage) * fraction
-            forecast_top, forecast_bottom = _braille_point(percentage, column % 2 == 0)
+            forecast_top, forecast_bottom = _braille_fill(percentage, column % 2 == 0)
             top[column] = forecast_top
             bottom[column] = forecast_bottom
             percentages_by_column[column] = percentage
@@ -220,7 +222,7 @@ def axis_rows(now: int) -> tuple[str, str]:
 
 
 def _style_sleep(row: str) -> str:
-    return re.sub(r"([⣀z]+)", rf"{MUTED}{DIM}\1{RESET}", row)
+    return re.sub(r"(z+)", rf"{MUTED}{DIM}\1{RESET}", row)
 
 
 def _style_battery(row: str, percentages: Sequence[float | None]) -> str:

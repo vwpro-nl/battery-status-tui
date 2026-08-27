@@ -7,8 +7,9 @@ import unittest
 from battery_status_tui.graph import (
     COLUMN_SECONDS, FORECAST_SECONDS, GRAPH_OFFSET, GRAPH_WIDTH,
     HISTORY_SECONDS, NOW_INDEX, TIME_COLUMNS,
-    _battery_color, _chart_rows_and_percentages, _style_battery, axis_rows,
-    chart_rows, column_timestamp, project_column, render_dashboard, title_line,
+    _battery_color, _braille_fill, _chart_rows_and_percentages, _style_battery,
+    axis_rows, chart_rows, column_timestamp, project_column, render_dashboard,
+    title_line,
 )
 from battery_status_tui.models import Estimate, Measurement, Session, SleepInterval
 
@@ -156,6 +157,22 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(plain(title_line(self.current))[GRAPH_OFFSET + NOW_INDEX], "↓")
         self.assertTrue((top[NOW_INDEX + 1:] + bottom[NOW_INDEX + 1:]).strip())
 
+    def test_history_remains_solid_and_forecast_uses_braille_fill(self):
+        top, bottom = chart_rows(self.current, self.history, Estimate(7200, "test"), self.now)
+        history_glyphs = (top[:NOW_INDEX] + bottom[:NOW_INDEX]).replace(" ", "")
+        forecast_glyphs = (top[NOW_INDEX + 1:] + bottom[NOW_INDEX + 1:]).replace(" ", "")
+        self.assertTrue(history_glyphs)
+        self.assertTrue(all(character in "▁▂▃▄▅▆▇█" for character in history_glyphs))
+        self.assertTrue(forecast_glyphs)
+        self.assertTrue(all(0x2800 <= ord(character) <= 0x28ff for character in forecast_glyphs))
+
+    def test_braille_fill_height_tracks_forecast_percentage(self):
+        for percentage in (0, 25, 50, 75, 100):
+            with self.subTest(percentage=percentage):
+                top, bottom = _braille_fill(percentage, False)
+                dots = sum((ord(character) - 0x2800).bit_count() for character in (top, bottom) if character != " ")
+                self.assertEqual(dots, round(percentage / 100 * 8))
+
     def test_forecast_stops_at_estimated_empty(self):
         top, bottom = chart_rows(self.current, self.history, Estimate(1800, "test"), self.now)
         endpoint = project_column(self.now + 1800, self.now)
@@ -217,9 +234,10 @@ class GraphTests(unittest.TestCase):
         )
         styled = _style_battery(top, percentages) + _style_battery(bottom, percentages)
         forecast = [value for value in percentages[NOW_INDEX + 1:] if value is not None]
+        visible_forecast = [value for value in forecast if round(value / 100 * 8) > 0]
         self.assertIn(_battery_color(forecast[0]), styled)
         self.assertIn(_battery_color(forecast[len(forecast) // 2]), styled)
-        self.assertIn(_battery_color(forecast[-1]), styled)
+        self.assertIn(_battery_color(visible_forecast[-1]), styled)
 
     def test_battery_colors_preserve_width_now_axis_and_sleep(self):
         sleep = SleepInterval(stamp(18), stamp(19), pre_percentage=55, post_percentage=53)
@@ -231,13 +249,14 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(lines[1][GRAPH_OFFSET + NOW_INDEX], "│")
         self.assertEqual(lines[2][GRAPH_OFFSET + NOW_INDEX], "│")
         self.assertEqual(lines[3][GRAPH_OFFSET:], axis_rows(self.now)[0])
-        self.assertIn("\x1b[38;5;244m\x1b[2m⣀", rendered)
+        self.assertIn("\x1b[38;5;244m\x1b[2mz", rendered)
+        self.assertNotIn("⣀", rendered)
 
     def test_pre_sleep_sleep_and_post_resume_segments_all_remain_visible(self):
         sleep = SleepInterval(stamp(18), stamp(20), pre_percentage=55, post_percentage=51)
         top, bottom = chart_rows(self.current, self.history, None, self.now, [sleep])
         self.assertNotEqual((top[8], bottom[8]), (" ", " "))  # 17:40 history
-        self.assertEqual(top[9:15], "⣀⣀⣀⣀⣀⣀")
+        self.assertEqual(top[9:15], "      ")
         self.assertEqual(bottom[9:15], " z  z ")
         self.assertNotEqual((top[15], bottom[15]), (" ", " "))  # 20:00 resumed history
         self.assertNotEqual((top[17], bottom[17]), (" ", " "))
@@ -245,7 +264,7 @@ class GraphTests(unittest.TestCase):
     def test_short_sleep_marks_at_least_one_column(self):
         sleep = SleepInterval(stamp(20, 5), stamp(20, 10), pre_percentage=49, post_percentage=49)
         top, bottom = chart_rows(self.current, self.history, None, self.now, [sleep])
-        self.assertEqual(top.count("⣀"), 1)
+        self.assertNotIn("⣀", top)
         self.assertEqual(bottom.count("z"), 1)
 
     def test_partial_sleep_boundary_does_not_overwrite_adjacent_history(self):
@@ -254,15 +273,15 @@ class GraphTests(unittest.TestCase):
         top, bottom = chart_rows(self.current, history, None, self.now, [sleep])
         before = project_column(stamp(17, 55), self.now)
         after = project_column(stamp(20, 5), self.now)
-        self.assertNotEqual((top[before], bottom[before]), ("⣀", "z"))
+        self.assertNotEqual(bottom[before], "z")
         self.assertNotEqual((top[before], bottom[before]), (" ", " "))
-        self.assertNotEqual((top[after], bottom[after]), ("⣀", "z"))
+        self.assertNotEqual(bottom[after], "z")
         self.assertNotEqual((top[after], bottom[after]), (" ", " "))
 
     def test_sleep_width_tracks_twenty_minute_columns(self):
         sleep = SleepInterval(stamp(18), stamp(21), pre_percentage=55, post_percentage=50)
         top, bottom = chart_rows(self.current, self.history, None, self.now, [sleep])
-        self.assertEqual(top.count("⣀"), 9)
+        self.assertNotIn("⣀", top)
         self.assertEqual(bottom.count("z"), 3)
         self.assertEqual([index for index, character in enumerate(bottom) if character == "z"], [10, 13, 16])
 
@@ -281,10 +300,10 @@ class GraphTests(unittest.TestCase):
         self.assertIn("1h00", lines[1])
         self.assertTrue(lines[1].startswith("1h00"))
         self.assertTrue(lines[2].startswith("start"))
-        self.assertIn("⣀⣀⣀", lines[1])
+        self.assertNotIn("⣀", lines[1])
         self.assertIn("z", lines[2])
         self.assertIn("\x1b[2m", rendered)
-        self.assertEqual(lines[1].index("⣀"), GRAPH_OFFSET + project_column(stamp(18), self.now))
+        self.assertEqual(lines[2].index("z"), GRAPH_OFFSET + project_column(stamp(18, 20), self.now))
         self.assertEqual(lines[1][GRAPH_OFFSET - 1], " ")
         eta_start = GRAPH_OFFSET + GRAPH_WIDTH + 1
         self.assertEqual(lines[1][GRAPH_OFFSET + GRAPH_WIDTH], " ")
