@@ -58,18 +58,22 @@ class GraphTests(unittest.TestCase):
         for column in range(GRAPH_WIDTH):
             self.assertEqual(project_column(column_timestamp(column, now), now), column)
 
-    def test_axis_uses_same_grid_and_moves_one_column_at_20_minutes(self):
-        axis_before, labels_before = axis_rows(stamp(20, 19))
-        axis_after, labels_after = axis_rows(stamp(20, 20))
-        ticks_before = [index for index, character in enumerate(axis_before) if character == "┬"]
-        ticks_after = [index for index, character in enumerate(axis_after) if character == "┬"]
-        self.assertEqual(ticks_after, [position - 1 for position in ticks_before])
-        self.assertIn("18", labels_before)
-        self.assertIn("21", labels_before)
-        for position in ticks_after:
-            local = dt.datetime.fromtimestamp(column_timestamp(position, stamp(20, 20))).astimezone()
-            self.assertEqual(local.minute, 0)
-            self.assertEqual(local.hour % 3, 0)
+    def test_axis_labels_advance_only_on_each_full_hour(self):
+        expected = {
+            (21, 59): ["15", "18", "21", "00", "03"],
+            (22, 0): ["16", "19", "22", "01", "04"],
+            (23, 0): ["17", "20", "23", "02", "05"],
+        }
+        for (hour, minute), labels in expected.items():
+            with self.subTest(hour=hour, minute=minute):
+                axis, rendered = axis_rows(stamp(hour, minute))
+                self.assertEqual(re.findall(r"\d{2}", rendered), labels)
+                self.assertEqual([index for index, character in enumerate(axis) if character == "┬"],
+                                 [0, 9, 18, 27, 36])
+
+    def test_axis_labels_do_not_follow_twenty_minute_data_shifts(self):
+        self.assertEqual(axis_rows(stamp(21, 0)), axis_rows(stamp(21, 20)))
+        self.assertEqual(axis_rows(stamp(21, 20)), axis_rows(stamp(21, 40)))
 
     def test_hour_boundary_is_one_column_not_an_hour_jump(self):
         fixed = stamp(20)
@@ -93,15 +97,15 @@ class GraphTests(unittest.TestCase):
         sleep = SleepInterval(stamp(18), stamp(20), pre_percentage=55, post_percentage=51)
         top, bottom = chart_rows(self.current, self.history, None, self.now, [sleep])
         self.assertNotEqual((top[8], bottom[8]), (" ", " "))  # 17:40 history
-        self.assertEqual(top[9:15], "......")
-        self.assertEqual(bottom[9:15], "zzzzzz")
+        self.assertEqual(top[9:15], "⣀⣀⣀⣀⣀⣀")
+        self.assertEqual(bottom[9:15], " z  z ")
         self.assertNotEqual((top[15], bottom[15]), (" ", " "))  # 20:00 resumed history
         self.assertNotEqual((top[17], bottom[17]), (" ", " "))
 
     def test_short_sleep_marks_at_least_one_column(self):
         sleep = SleepInterval(stamp(20, 5), stamp(20, 10), pre_percentage=49, post_percentage=49)
         top, bottom = chart_rows(self.current, self.history, None, self.now, [sleep])
-        self.assertEqual(top.count("."), 1)
+        self.assertEqual(top.count("⣀"), 1)
         self.assertEqual(bottom.count("z"), 1)
 
     def test_partial_sleep_boundary_does_not_overwrite_adjacent_history(self):
@@ -110,16 +114,17 @@ class GraphTests(unittest.TestCase):
         top, bottom = chart_rows(self.current, history, None, self.now, [sleep])
         before = project_column(stamp(17, 55), self.now)
         after = project_column(stamp(20, 5), self.now)
-        self.assertNotEqual((top[before], bottom[before]), (".", "z"))
+        self.assertNotEqual((top[before], bottom[before]), ("⣀", "z"))
         self.assertNotEqual((top[before], bottom[before]), (" ", " "))
-        self.assertNotEqual((top[after], bottom[after]), (".", "z"))
+        self.assertNotEqual((top[after], bottom[after]), ("⣀", "z"))
         self.assertNotEqual((top[after], bottom[after]), (" ", " "))
 
     def test_sleep_width_tracks_twenty_minute_columns(self):
         sleep = SleepInterval(stamp(18), stamp(21), pre_percentage=55, post_percentage=50)
         top, bottom = chart_rows(self.current, self.history, None, self.now, [sleep])
-        self.assertEqual(top.count("."), 9)
-        self.assertEqual(bottom.count("z"), 9)
+        self.assertEqual(top.count("⣀"), 9)
+        self.assertEqual(bottom.count("z"), 3)
+        self.assertEqual([index for index, character in enumerate(bottom) if character == "z"], [10, 13, 16])
 
     def test_unmeasured_non_sleep_gap_stays_empty(self):
         history = [sample(stamp(16)), sample(stamp(18))]
@@ -127,16 +132,22 @@ class GraphTests(unittest.TestCase):
         middle = project_column(stamp(17), self.now)
         self.assertEqual((top[middle], bottom[middle]), (" ", " "))
 
-    def test_dashboard_keeps_two_graph_rows_and_dims_sleep(self):
+    def test_dashboard_keeps_two_graph_rows_dims_sleep_and_uses_one_cell_margins(self):
         sleep = SleepInterval(stamp(18), stamp(19), pre_percentage=55, post_percentage=53)
         session = Session(1, "discharging", stamp(20), None, 55, None)
         rendered = render_dashboard(self.current, self.history, session, Estimate(7200, "test"), self.now, [sleep])
         lines = plain(rendered).splitlines()
         self.assertEqual(len(lines), 5)
         self.assertIn("1h00", lines[2])
-        self.assertIn("...", lines[1])
-        self.assertIn("zzz", lines[2])
+        self.assertIn("⣀⣀⣀", lines[1])
+        self.assertIn("z", lines[2])
         self.assertIn("\x1b[2m", rendered)
+        self.assertEqual(lines[1].index("⣀"), GRAPH_OFFSET + project_column(stamp(18), self.now))
+        self.assertEqual(lines[2][GRAPH_OFFSET - 1], " ")
+        eta_start = GRAPH_OFFSET + GRAPH_WIDTH + 1
+        self.assertEqual(lines[2][GRAPH_OFFSET + GRAPH_WIDTH], " ")
+        self.assertEqual(lines[2][eta_start:], "2h00 ~23:00")
+        self.assertEqual(max(len(line) for line in lines), 55)
 
     def test_approximate_power_has_tilde(self):
         current = Measurement(self.now, 48, "discharging", False, power_w=7.2, power_approximate=True)

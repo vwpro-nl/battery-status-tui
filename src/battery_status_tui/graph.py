@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import math
 import re
 import statistics
 from collections import defaultdict
@@ -26,7 +27,7 @@ GRAPH_WIDTH = TIME_COLUMNS + 1
 NOW_INDEX = TIME_COLUMNS // 2
 HISTORY_SECONDS = 6 * 3600
 FORECAST_SECONDS = 6 * 3600
-GRAPH_OFFSET = 10
+GRAPH_OFFSET = 6
 BLOCKS = " ▁▂▃▄▅▆▇█"
 BRAILLE_LEFT = ("⠁", "⠂", "⠄", "⡀")
 BRAILLE_RIGHT = ("⠈", "⠐", "⠠", "⢀")
@@ -86,6 +87,12 @@ def _sleep_columns(interval: SleepInterval, now: int) -> range:
     return range(start, end + 1)
 
 
+def _sleep_z_columns(columns: range) -> set[int]:
+    width = len(columns)
+    count = max(1, math.ceil(width / 4))
+    return {columns.start + (2 * index + 1) * width // (2 * count) for index in range(count)}
+
+
 def chart_rows(
     current: Measurement,
     history: Sequence[Measurement],
@@ -107,9 +114,11 @@ def chart_rows(
     for interval in sleep_intervals:
         if interval.ended_at <= now - HISTORY_SECONDS or interval.started_at >= now:
             continue
-        for column in _sleep_columns(interval, now):
-            top[column] = "."
-            bottom[column] = "z"
+        columns = _sleep_columns(interval, now)
+        z_columns = _sleep_z_columns(columns)
+        for column in columns:
+            top[column] = "⣀"
+            bottom[column] = "z" if column in z_columns else " "
 
     top[NOW_INDEX] = "│"
     bottom[NOW_INDEX] = "│"
@@ -139,25 +148,19 @@ def format_duration(seconds: int | None) -> str:
     return f"{hours}h{minutes:02d}"
 
 
-def _clock(timestamp: int) -> str:
-    return dt.datetime.fromtimestamp(timestamp).astimezone().strftime("%H")
-
-
 def axis_rows(now: int) -> tuple[str, str]:
     axis = ["─"] * GRAPH_WIDTH
     labels = [" "] * GRAPH_WIDTH
-    for position in range(GRAPH_WIDTH):
-        timestamp = column_timestamp(position, now)
-        local = dt.datetime.fromtimestamp(timestamp).astimezone()
-        if local.minute == 0 and local.hour % 3 == 0:
-            axis[position] = "┬"
-            label = _clock(timestamp)
-            _put(labels, min(position, GRAPH_WIDTH - len(label)), label)
+    hour = dt.datetime.fromtimestamp(now).astimezone().hour
+    for position, offset in zip((0, 9, 18, 27, 36), (-6, -3, 0, 3, 6)):
+        axis[position] = "┬"
+        label = f"{(hour + offset) % 24:02d}"
+        _put(labels, min(position, GRAPH_WIDTH - len(label)), label)
     return "".join(axis), "".join(labels).rstrip()
 
 
 def _style_sleep(row: str) -> str:
-    return re.sub(r"([.z]+)", rf"{MUTED}{DIM}\1{RESET}", row)
+    return re.sub(r"([⣀z]+)", rf"{MUTED}{DIM}\1{RESET}", row)
 
 
 def title_line(current: Measurement) -> str:
@@ -184,7 +187,7 @@ def render_dashboard(
 ) -> str:
     top, bottom = chart_rows(current, history, estimate, now, sleep_intervals)
     elapsed = None if session is None else max(0, now - session.started_at)
-    left_label = format_duration(elapsed).ljust(GRAPH_OFFSET)
+    left_label = format_duration(elapsed).rjust(GRAPH_OFFSET - 1) + " "
     if estimate is None:
         right_label = "--"
     else:
@@ -195,7 +198,7 @@ def render_dashboard(
         (
             title_line(current),
             " " * GRAPH_OFFSET + _style_sleep(top),
-            f"{MUTED}{left_label}{RESET}{_style_sleep(bottom)}  {DIM}{right_label}{RESET}",
+            f"{MUTED}{left_label}{RESET}{_style_sleep(bottom)} {DIM}{right_label}{RESET}",
             " " * GRAPH_OFFSET + axis,
             " " * GRAPH_OFFSET + labels,
         )
