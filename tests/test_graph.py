@@ -204,34 +204,37 @@ class GraphTests(unittest.TestCase):
         rendered = render_dashboard(self.current, self.history, session, Estimate(7200, "test"), self.now, [sleep])
         lines = plain(rendered).splitlines()
         self.assertEqual(len(lines), 6)
-        self.assertIn("1h00", lines[2])
-        self.assertTrue(lines[2].startswith("1h00"))
-        self.assertTrue(lines[3].startswith("start"))
+        self.assertIn("1h00", lines[1])
+        self.assertTrue(lines[1].startswith("1h00"))
+        self.assertTrue(lines[2].startswith("start"))
+        self.assertEqual(lines[3], "")
         self.assertIn("⣀⣀⣀", lines[1])
         self.assertIn("z", lines[2])
         self.assertIn("\x1b[2m", rendered)
         self.assertEqual(lines[1].index("⣀"), GRAPH_OFFSET + project_column(stamp(18), self.now))
-        self.assertEqual(lines[2][GRAPH_OFFSET - 1], " ")
+        self.assertEqual(lines[1][GRAPH_OFFSET - 1], " ")
         eta_start = GRAPH_OFFSET + GRAPH_WIDTH + 1
-        self.assertEqual(lines[2][GRAPH_OFFSET + GRAPH_WIDTH], " ")
-        self.assertEqual(lines[2][eta_start:], "2h00 ~23:00")
-        self.assertEqual(lines[3][eta_start:], "empty")
+        self.assertEqual(lines[1][GRAPH_OFFSET + GRAPH_WIDTH], " ")
+        self.assertEqual(lines[1][eta_start:], "2h00 ~23:00")
+        self.assertEqual(lines[2][eta_start:], "empty")
         self.assertIn("┬", lines[4])
         self.assertEqual(max(len(line) for line in lines), 55)
 
     def test_meaning_labels_are_conditional(self):
         estimate = Estimate(3600, "test")
         discharge = render_dashboard(self.current, self.history, None, estimate, self.now)
-        discharge_meanings = plain(discharge).splitlines()[3]
+        discharge_meanings = plain(discharge).splitlines()[2]
         self.assertNotIn("start", discharge_meanings)
         self.assertIn("empty", discharge_meanings)
 
         session = Session(1, "discharging", stamp(20), None, 55, None)
-        no_eta_meanings = plain(render_dashboard(self.current, self.history, session, None, self.now)).splitlines()[3]
-        self.assertEqual(no_eta_meanings, "start")
+        no_eta_meanings = plain(render_dashboard(self.current, self.history, session, None, self.now)).splitlines()[2]
+        self.assertTrue(no_eta_meanings.startswith("start"))
+        self.assertNotIn("empty", no_eta_meanings)
+        self.assertNotIn("full", no_eta_meanings)
 
         charging = Measurement(self.now, 48, "charging", True)
-        charging_meanings = plain(render_dashboard(charging, self.history, session, estimate, self.now)).splitlines()[3]
+        charging_meanings = plain(render_dashboard(charging, self.history, session, estimate, self.now)).splitlines()[2]
         self.assertNotIn("empty", charging_meanings)
         self.assertEqual(charging_meanings[GRAPH_OFFSET + GRAPH_WIDTH + 1:], "full")
 

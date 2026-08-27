@@ -229,18 +229,17 @@ def render_dashboard(
         end_time = dt.datetime.fromtimestamp(now + estimate.seconds).astimezone().strftime("%H:%M")
         right_label = f"{format_duration(estimate.seconds)} ~{end_time}"
     axis, labels = axis_rows(now)
-    meanings = [" "] * (GRAPH_OFFSET + GRAPH_WIDTH + 1 + len(right_label))
-    if elapsed is not None:
-        _put(meanings, 0, "start")
-    if estimate is not None and current.session_kind in {"charging", "discharging"}:
-        _put(meanings, GRAPH_OFFSET + GRAPH_WIDTH + 1,
-             "full" if current.session_kind == "charging" else "empty")
+    left_meaning = "start" if elapsed is not None else ""
+    right_meaning = ("full" if current.session_kind == "charging" else "empty") if (
+        estimate is not None and current.session_kind in {"charging", "discharging"}
+    ) else ""
     return "\n".join(
         (
             title_line(current),
-            " " * GRAPH_OFFSET + _style_sleep(top),
-            f"{MUTED}{left_label}{RESET}{_style_sleep(bottom)} {DIM}{right_label}{RESET}",
-            f"{MUTED}{DIM}{''.join(meanings).rstrip()}{RESET}",
+            f"{MUTED}{left_label}{RESET}{_style_sleep(top)} {DIM}{right_label}{RESET}",
+            f"{MUTED}{DIM}{left_meaning.ljust(GRAPH_OFFSET)}{RESET}{_style_sleep(bottom)} "
+            f"{MUTED}{DIM}{right_meaning}{RESET}".rstrip(),
+            "",
             " " * GRAPH_OFFSET + axis,
             " " * GRAPH_OFFSET + labels,
         )
