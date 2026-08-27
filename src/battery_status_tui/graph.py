@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import datetime as dt
-import math
 import re
 import statistics
 from collections import defaultdict
@@ -84,10 +83,6 @@ def _history_column(timestamp: int, now: int) -> int | None:
     return column if sample_bucket <= latest_closed_bucket and 0 <= column < NOW_INDEX else None
 
 
-def _inside_sleep(timestamp: int, intervals: Sequence[SleepInterval]) -> bool:
-    return any(interval.started_at <= timestamp < interval.ended_at for interval in intervals)
-
-
 def _sleep_columns(interval: SleepInterval, now: int) -> range:
     first_full_bucket = (interval.started_at + COLUMN_SECONDS - 1) // COLUMN_SECONDS
     after_last_full_bucket = interval.ended_at // COLUMN_SECONDS
@@ -108,12 +103,14 @@ def _sleep_columns(interval: SleepInterval, now: int) -> range:
     return range(start, end + 1)
 
 
-def _sleep_z_columns(columns: range) -> set[int]:
-    width = len(columns)
-    if width == 0:
-        return set()
-    count = max(1, math.ceil(width / 4))
-    return {columns.start + (2 * index + 1) * width // (2 * count) for index in range(count)}
+def _sleep_boundary_percentages(
+    interval: SleepInterval, history: Sequence[Measurement]
+) -> tuple[float | None, float | None]:
+    before = [sample for sample in history if sample.timestamp <= interval.started_at]
+    after = [sample for sample in history if sample.timestamp >= interval.ended_at]
+    pre_percentage = max(before, key=lambda sample: sample.timestamp).percentage if before else interval.pre_percentage
+    post_percentage = min(after, key=lambda sample: sample.timestamp).percentage if after else interval.post_percentage
+    return pre_percentage, post_percentage
 
 
 def _battery_color(percentage: float) -> str:
@@ -143,7 +140,7 @@ def _chart_rows_and_percentages(
     percentages_by_column: list[float | None] = [None] * GRAPH_WIDTH
     buckets: dict[int, list[float]] = defaultdict(list)
     for sample in history:
-        if now - HISTORY_SECONDS <= sample.timestamp < now and not _inside_sleep(sample.timestamp, sleep_intervals):
+        if now - HISTORY_SECONDS <= sample.timestamp < now:
             column = _history_column(sample.timestamp, now)
             if column is not None:
                 buckets[column].append(sample.percentage)
@@ -156,11 +153,19 @@ def _chart_rows_and_percentages(
         if interval.ended_at <= now - HISTORY_SECONDS or interval.started_at >= now:
             continue
         columns = _sleep_columns(interval, now)
-        z_columns = _sleep_z_columns(columns)
+        pre_percentage, post_percentage = _sleep_boundary_percentages(interval, history)
+        if pre_percentage is None or post_percentage is None or interval.ended_at <= interval.started_at:
+            continue
         for column in columns:
-            top[column] = " "
-            bottom[column] = "z" if column in z_columns else " "
-            percentages_by_column[column] = None
+            if column in buckets:
+                continue
+            timestamp = column_timestamp(column, now) + COLUMN_SECONDS / 2
+            fraction = max(0.0, min(
+                1.0, (timestamp - interval.started_at) / (interval.ended_at - interval.started_at)
+            ))
+            percentage = pre_percentage + (post_percentage - pre_percentage) * fraction
+            top[column], bottom[column] = _braille_fill(percentage)
+            percentages_by_column[column] = percentage
 
     top[NOW_INDEX] = "│"
     bottom[NOW_INDEX] = "│"
@@ -227,17 +232,12 @@ def axis_rows(now: int) -> tuple[str, str]:
     return "".join(axis), "".join(labels).rstrip()
 
 
-def _style_sleep(row: str) -> str:
-    return re.sub(r"(z+)", rf"{MUTED}{DIM}\1{RESET}", row)
-
-
 def _style_battery(row: str, percentages: Sequence[float | None]) -> str:
-    styled = "".join(
+    return "".join(
         f"{_battery_color(percentage)}{character}{RESET}"
         if percentage is not None and character != " " else character
         for character, percentage in zip(row, percentages)
     )
-    return _style_sleep(styled)
 
 
 def title_line(current: Measurement) -> str:
