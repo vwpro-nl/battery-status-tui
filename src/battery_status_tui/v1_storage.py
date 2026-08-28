@@ -333,32 +333,56 @@ class V1Storage:
         )
 
     def recover(self, db: sqlite3.Connection | None = None) -> RecoverySelection:
-        owned = db is None
-        connection = self._writer() if owned else db
-        assert connection is not None
-        warnings: list[str] = []
-        try:
-            generations = [int(row[0]) for row in connection.execute(
+        if db is None:
+            with self.reader() as connection:
+                return self._recover_from(connection)
+        return self._recover_from(db)
+
+    def valid_generations(self, limit: int = MAX_GENERATIONS) -> tuple[GenerationSnapshot, ...]:
+        """Return newest valid checkpoints through a strictly read-only connection."""
+        if limit <= 0:
+            return ()
+        snapshots = []
+        with self.reader() as db:
+            for row in db.execute(
                 "SELECT generation FROM checkpoint_generations WHERE complete=1 "
                 "ORDER BY generation DESC"
-            )]
-            for generation in generations:
+            ):
+                generation = int(row[0])
                 try:
-                    snapshot = self._load_generation(connection, generation)
-                    header = connection.execute(
+                    snapshot = self._load_generation(db, generation)
+                    digest = db.execute(
                         "SELECT payload_digest FROM checkpoint_generations WHERE generation=?",
                         (generation,),
-                    ).fetchone()
-                    if snapshot is None or generation_digest(snapshot) != str(header[0]):
-                        raise V1StorageError("digest or checkpoint invariant mismatch")
-                    return RecoverySelection(snapshot, tuple(warnings))
-                except (ValueError, sqlite3.Error, V1StorageError) as error:
-                    warnings.append(f"checkpoint generation {generation} invalid: {error}")
-            warnings.append("no valid checkpoint generation; cold start")
-            return RecoverySelection(None, tuple(warnings))
-        finally:
-            if owned:
-                connection.close()
+                    ).fetchone()[0]
+                    if snapshot is not None and generation_digest(snapshot) == digest:
+                        snapshots.append(snapshot)
+                except (ValueError, sqlite3.Error, V1StorageError):
+                    continue
+                if len(snapshots) == limit:
+                    break
+        return tuple(snapshots)
+
+    def _recover_from(self, connection: sqlite3.Connection) -> RecoverySelection:
+        warnings: list[str] = []
+        generations = [int(row[0]) for row in connection.execute(
+            "SELECT generation FROM checkpoint_generations WHERE complete=1 "
+            "ORDER BY generation DESC"
+        )]
+        for generation in generations:
+            try:
+                snapshot = self._load_generation(connection, generation)
+                header = connection.execute(
+                    "SELECT payload_digest FROM checkpoint_generations WHERE generation=?",
+                    (generation,),
+                ).fetchone()
+                if snapshot is None or generation_digest(snapshot) != str(header[0]):
+                    raise V1StorageError("digest or checkpoint invariant mismatch")
+                return RecoverySelection(snapshot, tuple(warnings))
+            except (ValueError, sqlite3.Error, V1StorageError) as error:
+                warnings.append(f"checkpoint generation {generation} invalid: {error}")
+        warnings.append("no valid checkpoint generation; cold start")
+        return RecoverySelection(None, tuple(warnings))
 
     def cleanup_generations(self) -> None:
         with self.transaction() as db:

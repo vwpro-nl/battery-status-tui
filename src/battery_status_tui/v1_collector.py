@@ -299,7 +299,8 @@ class V1Collector:
                 current.timestamp_ms, round(current.soc * 1_000),
                 None if current.power_w is None else round(current.power_w * 1_000),
                 delta, _recent_state(current.state), current.profile,
-                current.battery_set_key, _recent_flags(current, broken=not valid),
+                current.battery_set_key,
+                _recent_flags(current, broken=not valid or crosses_sleep),
             ))
             series = encode_recent_series(points)
             checkpoint_batteries = self._checkpoint_batteries(
