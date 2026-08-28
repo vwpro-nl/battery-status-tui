@@ -46,7 +46,9 @@ class StorageTests(unittest.TestCase):
             db.executescript("CREATE TABLE samples(id INTEGER PRIMARY KEY, timestamp INTEGER, session_id INTEGER, percentage REAL, state TEXT, ac_online INTEGER, power_w REAL, voltage_v REAL, current_a REAL, upower_remaining_s INTEGER, source TEXT, device TEXT, UNIQUE(timestamp, device)); CREATE TABLE sessions(id INTEGER PRIMARY KEY, kind TEXT, started_at INTEGER, ended_at INTEGER, start_percentage REAL, end_percentage REAL, end_reason TEXT); CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT);")
             db.execute("INSERT INTO samples(timestamp, percentage, state, source, device) VALUES(1, 50, 'full', 'old', 'BAT0')")
             db.commit(); db.close()
-            self.assertEqual(Storage(path).latest().percentage, 50)
+            storage = Storage(path)
+            storage.initialize_writer()
+            self.assertEqual(storage.latest().percentage, 50)
 
     def test_raw_samples_and_sleep_intervals_round_trip(self):
         with tempfile.TemporaryDirectory() as directory:

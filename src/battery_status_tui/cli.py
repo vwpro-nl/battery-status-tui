@@ -162,6 +162,7 @@ def main(argv: list[str] | None = None) -> int:
 
     source = BatterySource()
     storage = Storage(args.database)
+    storage.initialize_writer()
     health_resolver = HealthResolver()
     profile_resolver = PowerProfileResolver()
     reconcile_journal(storage, int(time.time()))

@@ -9,70 +9,8 @@ from contextlib import contextmanager
 from collections.abc import Iterator
 from pathlib import Path
 
+from .migrations import configure_reader, configure_writer, run_writer_migrations, validate_reader_schema
 from .models import Measurement, RawBatterySnapshot, Session, SleepInterval
-
-
-SCHEMA = """
-PRAGMA foreign_keys = ON;
-CREATE TABLE IF NOT EXISTS sessions (
-    id INTEGER PRIMARY KEY,
-    kind TEXT NOT NULL CHECK (kind IN ('charging', 'discharging')),
-    started_at INTEGER NOT NULL,
-    ended_at INTEGER,
-    start_percentage REAL NOT NULL,
-    end_percentage REAL,
-    end_reason TEXT
-);
-CREATE TABLE IF NOT EXISTS samples (
-    id INTEGER PRIMARY KEY,
-    timestamp INTEGER NOT NULL,
-    session_id INTEGER REFERENCES sessions(id),
-    percentage REAL NOT NULL,
-    state TEXT NOT NULL,
-    ac_online INTEGER,
-    power_w REAL,
-    voltage_v REAL,
-    current_a REAL,
-    upower_remaining_s INTEGER,
-    source TEXT NOT NULL,
-    device TEXT NOT NULL,
-    UNIQUE(timestamp, device)
-);
-CREATE INDEX IF NOT EXISTS samples_timestamp_idx ON samples(timestamp);
-CREATE INDEX IF NOT EXISTS samples_session_idx ON samples(session_id, timestamp);
-CREATE TABLE IF NOT EXISTS metadata (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS battery_samples (
-    id INTEGER PRIMARY KEY,
-    timestamp INTEGER NOT NULL,
-    device TEXT NOT NULL,
-    identity TEXT NOT NULL,
-    state TEXT NOT NULL,
-    percentage REAL NOT NULL,
-    monotonic_s REAL NOT NULL,
-    boottime_s REAL NOT NULL,
-    boot_id TEXT NOT NULL,
-    power_now_w REAL, current_now_a REAL, voltage_now_v REAL,
-    energy_now_wh REAL, energy_full_wh REAL, energy_full_design_wh REAL,
-    charge_now_ah REAL, charge_full_ah REAL, charge_full_design_ah REAL,
-    upower_energy_rate_w REAL,
-    UNIQUE(timestamp, device)
-);
-CREATE INDEX IF NOT EXISTS battery_samples_identity_time_idx ON battery_samples(identity, timestamp);
-CREATE TABLE IF NOT EXISTS sleep_intervals (
-    id INTEGER PRIMARY KEY,
-    started_at INTEGER NOT NULL,
-    ended_at INTEGER NOT NULL,
-    kind TEXT NOT NULL DEFAULT 'sleep',
-    source TEXT NOT NULL,
-    boot_id TEXT,
-    pre_percentage REAL,
-    post_percentage REAL,
-    UNIQUE(started_at, ended_at)
-);
-"""
 
 
 def default_database_path() -> Path:
@@ -83,37 +21,49 @@ def default_database_path() -> Path:
 class Storage:
     def __init__(self, path: Path | None = None):
         self.path = path or default_database_path()
+        self._writer_initialized = False
 
-    @contextmanager
-    def connect(self) -> Iterator[sqlite3.Connection]:
+    def initialize_writer(self) -> None:
+        """Create or migrate the database once, exclusively from a writer start."""
+        if self._writer_initialized:
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(self.path, timeout=5)
         connection.row_factory = sqlite3.Row
-        connection.executescript(SCHEMA)
-        self._migrate(connection)
+        try:
+            run_writer_migrations(connection)
+        finally:
+            connection.close()
+        self._writer_initialized = True
+
+    @contextmanager
+    def connect(self) -> Iterator[sqlite3.Connection]:
+        """Open a schema-validating read-only connection."""
+        connection = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, timeout=5)
+        connection.row_factory = sqlite3.Row
+        configure_reader(connection)
+        try:
+            validate_reader_schema(connection)
+            yield connection
+        finally:
+            connection.close()
+
+    @contextmanager
+    def write_connect(self) -> Iterator[sqlite3.Connection]:
+        """Open a writer connection after the one-time writer migration."""
+        self.initialize_writer()
+        connection = sqlite3.connect(self.path, timeout=5)
+        connection.row_factory = sqlite3.Row
+        configure_writer(connection)
+        validate_reader_schema(connection)
         try:
             with connection:
                 yield connection
         finally:
             connection.close()
 
-    @staticmethod
-    def _migrate(db: sqlite3.Connection) -> None:
-        columns = {row[1] for row in db.execute("PRAGMA table_info(samples)")}
-        additions = {
-            "power_method": "TEXT NOT NULL DEFAULT 'unavailable'", "power_approximate": "INTEGER NOT NULL DEFAULT 0",
-            "power_confidence": "TEXT NOT NULL DEFAULT 'none'", "power_window_s": "REAL", "energy_wh": "REAL",
-            "energy_full_wh": "REAL", "energy_full_design_wh": "REAL", "charge_ah": "REAL",
-            "charge_full_ah": "REAL", "charge_full_design_ah": "REAL", "monotonic_s": "REAL",
-            "boottime_s": "REAL", "boot_id": "TEXT", "battery_identity": "TEXT",
-        }
-        for name, declaration in additions.items():
-            if name not in columns:
-                db.execute(f"ALTER TABLE samples ADD COLUMN {name} {declaration}")
-        db.execute("PRAGMA user_version = 2")
-
     def record(self, measurement: Measurement) -> int | None:
-        with self.connect() as db:
+        with self.write_connect() as db:
             active = db.execute(
                 "SELECT * FROM sessions WHERE ended_at IS NULL ORDER BY id DESC LIMIT 1"
             ).fetchone()
@@ -229,7 +179,7 @@ class Storage:
             upower_energy_rate_w=row["upower_energy_rate_w"])
 
     def record_sleep(self, interval: SleepInterval) -> None:
-        with self.connect() as db:
+        with self.write_connect() as db:
             pre_percentage = interval.pre_percentage
             post_percentage = interval.post_percentage
             if pre_percentage is None:
@@ -295,7 +245,7 @@ class Storage:
 
     def prune(self, before: int | None = None) -> int:
         cutoff = before if before is not None else int(time.time()) - 30 * 86400
-        with self.connect() as db:
+        with self.write_connect() as db:
             cursor = db.execute("DELETE FROM samples WHERE timestamp < ?", (cutoff,))
             db.execute("DELETE FROM battery_samples WHERE timestamp < ?", (cutoff,))
             db.execute("DELETE FROM sleep_intervals WHERE ended_at < ?", (cutoff,))
@@ -312,7 +262,7 @@ class Storage:
             return None
 
     def set_metadata_int(self, key: str, value: int) -> None:
-        with self.connect() as db:
+        with self.write_connect() as db:
             db.execute(
                 "INSERT INTO metadata(key, value) VALUES (?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
