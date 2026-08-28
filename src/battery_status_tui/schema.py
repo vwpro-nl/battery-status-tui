@@ -344,6 +344,7 @@ V1_CREATE_STATEMENTS = (
     """CREATE TABLE checkpoint_hourly (
         generation INTEGER NOT NULL REFERENCES checkpoint_generations(generation) ON DELETE CASCADE,
         hour_start_ms INTEGER NOT NULL,
+        battery_set_key TEXT,
         soc_first REAL CHECK(soc_first BETWEEN 0 AND 100 OR soc_first IS NULL),
         soc_last REAL CHECK(soc_last BETWEEN 0 AND 100 OR soc_last IS NULL),
         soc_min REAL CHECK(soc_min BETWEEN 0 AND 100 OR soc_min IS NULL),
