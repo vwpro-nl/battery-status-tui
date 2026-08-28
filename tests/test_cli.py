@@ -30,7 +30,8 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             storage = Storage(Path(directory) / "db.sqlite3")
             storage.initialize_writer()
-            text = diagnostic_text(measurement, storage)
+            text = diagnostic_text(measurement, session=storage.current_session(),
+                                   database_path=storage.path)
         self.assertIn("battery health: 62.5%", text)
         self.assertIn("cycle count: 72", text)
 

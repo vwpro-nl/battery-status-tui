@@ -4,19 +4,26 @@ from __future__ import annotations
 
 import argparse
 import signal
+import sqlite3
 import sys
 import time
+from contextlib import closing
 from pathlib import Path
 
 from . import __version__
 from .estimate import estimate_remaining, smooth_seconds
 from .graph import COLUMN_SECONDS, CSI, RESET, render_dashboard
-from .models import Estimate, Measurement
+from .models import Estimate, Measurement, Session
 from .models import SleepInterval
+from .schema import V1_SCHEMA_VERSION
 from .sources import BatterySource, SourceUnavailable, aggregate
 from .storage import Storage, default_database_path
 from .suspend import LogindMonitor, clock_sleep, journal_intervals
 from .system_status import HealthResolver, PowerProfileResolver
+from .v1_collector import V1CollectorError
+from .v1_history import V1History, V1HistoryError
+from .v1_runtime import collect_v1, render_v1
+from .v1_storage import V1Storage, V1StorageError
 
 
 UNICODE_PROBE = """SOLID  : █ ▇ ▆ ▅ ▄ ▃ ▂ ▁
@@ -93,10 +100,10 @@ def render_once(source: BatterySource, storage: Storage, now: int | None = None,
                             health.percent if health else None, profile.profile if profile else None)
 
 
-def diagnostic_text(measurement: Measurement, storage: Storage) -> str:
+def diagnostic_text(measurement: Measurement, *, session: Session | None,
+                    database_path: Path) -> str:
     health = measurement.health_percent
     remaining = measurement.remaining_seconds
-    session = storage.current_session()
 
     def value(number: float | int | None, suffix: str = "") -> str:
         return "unavailable" if number is None else f"{number}{suffix}"
@@ -125,7 +132,7 @@ def diagnostic_text(measurement: Measurement, storage: Storage) -> str:
             f"active session: {session.kind if session else 'none'}",
             f"battery identity: {measurement.battery_identity or 'unavailable'}",
             f"system batteries: {len(measurement.raw_batteries)}",
-            f"database: {storage.path}",
+            f"database: {database_path}",
     ]
     for item in measurement.raw_batteries:
         lines.extend((
@@ -154,12 +161,146 @@ def parser() -> argparse.ArgumentParser:
     return result
 
 
+def _on_disk_schema_version(path: Path) -> int | None:
+    """Return the persisted ``user_version``; ``None`` for an absent/empty file."""
+    try:
+        if path.stat().st_size == 0:
+            return None
+    except FileNotFoundError:
+        return None
+    try:
+        with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)) as db:
+            return int(db.execute("PRAGMA user_version").fetchone()[0])
+    except sqlite3.DatabaseError:
+        return None
+
+
+def _power_line(measurement: Measurement) -> str:
+    if measurement.power_w is None:
+        return "--W"
+    return f"{'~' if measurement.power_approximate else ''}{measurement.power_w:.2f}W"
+
+
+V4_RUNTIME_ERRORS = (SourceUnavailable, V1CollectorError, V1HistoryError, V1StorageError)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     if args.unicode_probe:
         print(UNICODE_PROBE)
         return 0
 
+    version = _on_disk_schema_version(args.database)
+    if version is not None and version not in (0, 1, 2, V1_SCHEMA_VERSION):
+        print(f"battery-status-tui: unsupported database schema v{version} at "
+              f"{args.database}; no runtime for this version", file=sys.stderr)
+        return 1
+    # A fresh database (``version is None``) is born at the native schema v4.
+    # Legacy schema v0/v1/v2 databases stay on the legacy runtime and are never
+    # migrated forward here; schema-v4 conversion is an explicit offline step.
+    if version is None or version == V1_SCHEMA_VERSION:
+        return _run_v4(args)
+    return _run_v2(args)
+
+
+def _run_v4(args: argparse.Namespace) -> int:
+    source = BatterySource()
+    storage = V1Storage(args.database)
+    profile_resolver = PowerProfileResolver()
+    interval_ms = max(1, round(args.interval * 1_000))
+    try:
+        storage.initialize_writer()
+    except V1StorageError as error:
+        print(f"battery-status-tui: {error}", file=sys.stderr)
+        return 1
+
+    last_poll_ts = 0
+
+    def poll() -> Measurement:
+        nonlocal last_poll_ts
+        now = int(time.time())
+        if now <= last_poll_ts:
+            # The schema-v4 collector requires strictly increasing poll seconds;
+            # the trial harness never re-polls fast enough to hit this, but the
+            # interactive projection-boundary wakeup can.
+            time.sleep(max(0.0, last_poll_ts + 1 - time.time()))
+            now = int(time.time())
+        resolved = profile_resolver.resolve()
+        measurement, _result = collect_v1(
+            source, storage, timestamp=now,
+            profile=None if resolved is None else resolved.profile,
+            journal_lookup=journal_intervals,
+            configured_interval_ms=interval_ms,
+        )
+        last_poll_ts = measurement.timestamp
+        return measurement
+
+    try:
+        if args.sample:
+            measurement = poll()
+            print(f"{measurement.timestamp} {measurement.percentage:.1f}% "
+                  f"{measurement.state} {_power_line(measurement)}")
+            return 0
+        if args.diagnose:
+            measurement = source.read(int(time.time()))
+            try:
+                session = V1History(storage.path).current_session()
+            except V1HistoryError:
+                session = None
+            print(diagnostic_text(measurement, session=session,
+                                  database_path=storage.path))
+            return 0
+        if args.once or not sys.stdout.isatty():
+            measurement = poll()
+            print(render_v1(storage, current=measurement))
+            return 0
+    except V4_RUNTIME_ERRORS as error:
+        print(f"battery-status-tui: {error}", file=sys.stderr)
+        return 1
+
+    running = True
+
+    def stop(_signum: int, _frame: object) -> None:
+        nonlocal running
+        running = False
+
+    signal.signal(signal.SIGINT, stop)
+    signal.signal(signal.SIGTERM, stop)
+    monitor = LogindMonitor()
+    monitor.start()
+    sys.stdout.write(CSI + "?25l")
+    try:
+        while running:
+            try:
+                measurement = poll()
+                output = render_v1(storage, current=measurement)
+            except V4_RUNTIME_ERRORS as error:
+                output = f"battery-status-tui: {error}"
+            sys.stdout.write(CSI + "2J" + CSI + "H" + output + "\n")
+            sys.stdout.flush()
+            shown_profile = profile_resolver.resolve()
+            deadline = time.monotonic() + next_refresh_delay(args.interval, time.time())
+            while running and time.monotonic() < deadline:
+                monitor.wakeup.wait(min(0.2, deadline - time.monotonic()))
+                resumed = False
+                for sleeping, _event_time in monitor.drain():
+                    if not sleeping:
+                        # Resume: the next poll reconstructs the suspend gap from
+                        # the stored clocks and journal, exactly as proven.
+                        resumed = True
+                if resumed:
+                    profile_resolver.invalidate()
+                    break
+                if profile_resolver.resolve() != shown_profile:
+                    break
+    finally:
+        monitor.close()
+        sys.stdout.write(RESET + CSI + "?25h")
+        sys.stdout.flush()
+    return 0
+
+
+def _run_v2(args: argparse.Namespace) -> int:
     source = BatterySource()
     storage = Storage(args.database)
     storage.initialize_writer()
@@ -169,14 +310,15 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.sample:
             measurement = collect(source, storage)
-            power = "--W" if measurement.power_w is None else f"{'~' if measurement.power_approximate else ''}{measurement.power_w:.2f}W"
-            print(f"{measurement.timestamp} {measurement.percentage:.1f}% {measurement.state} {power}")
+            print(f"{measurement.timestamp} {measurement.percentage:.1f}% "
+                  f"{measurement.state} {_power_line(measurement)}")
             return 0
         if args.diagnose:
             timestamp = int(time.time())
             measurement = source.read(timestamp, storage.raw_samples_since(timestamp - 600),
                                       tuple((item.started_at, item.ended_at) for item in storage.sleep_intervals_since(timestamp - 600)))
-            print(diagnostic_text(measurement, storage))
+            print(diagnostic_text(measurement, session=storage.current_session(),
+                                  database_path=storage.path))
             return 0
         if args.once or not sys.stdout.isatty():
             print(render_once(source, storage, health_resolver=health_resolver,

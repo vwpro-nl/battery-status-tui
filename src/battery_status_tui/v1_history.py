@@ -164,6 +164,14 @@ class V1History:
         except (sqlite3.Error, V1StorageError) as error:
             raise V1HistoryError(str(error)) from error
 
+    def current_session(self) -> Session | None:
+        """Return the open session without requiring a valid checkpoint."""
+        try:
+            with self.storage.reader() as db:
+                return self._current_session(db)
+        except (sqlite3.Error, V1StorageError) as error:
+            raise V1HistoryError(str(error)) from error
+
     @staticmethod
     def _raw_batteries(db: sqlite3.Connection, snapshot: GenerationSnapshot
                        ) -> tuple[RawBatterySnapshot, ...]:
