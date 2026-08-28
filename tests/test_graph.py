@@ -8,11 +8,11 @@ from unittest.mock import patch
 import battery_status_tui.graph as graph_module
 from battery_status_tui.graph import (
     COLUMN_SECONDS, FORECAST_SECONDS, GRAPH_OFFSET, GRAPH_WIDTH,
-    HISTORY_SECONDS, NOW_INDEX, TIME_COLUMNS,
+    HISTORY_SECONDS, MIN_EARLY_SLOPE, NOW_INDEX, TIME_COLUMNS,
     _battery_color, _braille_fill, _braille_mask, _braille_subcolumn_times,
-    _chart_rows_and_percentages, _fill_chars, _sleep_columns, _sleep_fraction,
-    _style_battery, axis_rows, chart_rows, column_timestamp, project_column,
-    render_dashboard, title_line,
+    _chart_rows_and_percentages, _early_raster, _fill_chars, _sleep_columns,
+    _sleep_fraction, _style_battery, axis_rows, chart_rows, column_timestamp,
+    project_column, render_dashboard, title_line,
 )
 from battery_status_tui.models import Estimate, Measurement, Session, SleepInterval
 
@@ -206,14 +206,37 @@ class GraphTests(unittest.TestCase):
     def test_braille_subcolumn_times_derive_from_bucket_duration(self):
         self.assertEqual(_braille_subcolumn_times(1000, 15 * 60), (1225, 1675))
 
-    def test_sleep_and_forecast_share_braille_fill_helper(self):
+    def test_sleep_and_forecast_share_early_raster_helper(self):
         sleep = SleepInterval(stamp(20), stamp(20, 20), pre_percentage=50, post_percentage=75)
-        with patch.object(graph_module, "_braille_fill", wraps=graph_module._braille_fill) as fill:
+        with patch.object(graph_module, "_early_raster", wraps=graph_module._early_raster) as raster:
             chart_rows(self.current, [], None, self.now, [sleep])
-            self.assertGreater(fill.call_count, 0)
-            fill.reset_mock()
+            self.assertGreater(raster.call_count, 0)
+            raster.reset_mock()
             chart_rows(self.current, [], Estimate(3600, "test"), self.now)
-            self.assertGreater(fill.call_count, 0)
+            self.assertGreater(raster.call_count, 0)
+
+    def test_early_raster_moves_clear_falling_and_rising_transitions(self):
+        self.assertEqual(_early_raster([6.20, 5.79, 5.38, 4.98]), [6, 5, 5, 5])
+        self.assertEqual(_early_raster([1.02, 1.42, 1.82, 2.21]), [1, 2, 2, 2])
+
+    def test_early_raster_leaves_flat_transitions_normally_rounded(self):
+        self.assertEqual(MIN_EARLY_SLOPE, 0.25)
+        self.assertEqual(_early_raster([6.51, 6.49]), [7, 6])
+        self.assertEqual(_early_raster([2.49, 2.51]), [2, 3])
+
+    def test_early_raster_preserves_monotonicity_and_stays_within_one_dot(self):
+        for heights in ([7.8, 7.2, 6.7, 6.1, 5.6, 5.0], [1.1, 1.6, 2.2, 2.8, 3.3, 3.9]):
+            raster = _early_raster(heights)
+            rounded = [round(height) for height in heights]
+            direction = 1 if heights[-1] > heights[0] else -1
+            self.assertTrue(all(direction * (right - left) >= 0
+                                for left, right in zip(raster, raster[1:])))
+            self.assertTrue(all(abs(actual - baseline) <= 1
+                                for actual, baseline in zip(raster, rounded)))
+
+    def test_early_raster_does_not_invent_changes_in_live_flat_sleep_shapes(self):
+        self.assertEqual(_early_raster([6.935, 6.889]), [7, 7])
+        self.assertEqual(_early_raster([2.724, 2.738, 2.752, 2.766, 2.779, 2.793]), [3] * 6)
 
     def test_forecast_stops_at_estimated_empty(self):
         top, bottom = chart_rows(self.current, self.history, Estimate(1800, "test"), self.now)
@@ -310,8 +333,9 @@ class GraphTests(unittest.TestCase):
 
     def test_discharging_forecast_uses_changing_gradient_colors(self):
         current = Measurement(self.now, 60, "discharging", False)
+        estimate = Estimate(6 * 3600, "test")
         top, bottom, percentages = _chart_rows_and_percentages(
-            current, [], Estimate(6 * 3600, "test"), self.now
+            current, [], estimate, self.now
         )
         styled = _style_battery(top, percentages) + _style_battery(bottom, percentages)
         forecast = [value for value in percentages[NOW_INDEX + 1:] if value is not None]
@@ -319,6 +343,12 @@ class GraphTests(unittest.TestCase):
         self.assertIn(_battery_color(forecast[0]), styled)
         self.assertIn(_battery_color(forecast[len(forecast) // 2]), styled)
         self.assertIn(_battery_color(visible_forecast[-1]), styled)
+        for column, percentage in enumerate(percentages[NOW_INDEX + 1:], NOW_INDEX + 1):
+            if percentage is not None:
+                elapsed = column_timestamp(column, self.now) + COLUMN_SECONDS / 2 - self.now
+                self.assertAlmostEqual(
+                    percentage, current.percentage * (1 - min(1, elapsed / estimate.seconds))
+                )
 
     def test_battery_colors_preserve_width_now_axis_and_sleep(self):
         sleep = SleepInterval(stamp(18), stamp(19), pre_percentage=55, post_percentage=53)

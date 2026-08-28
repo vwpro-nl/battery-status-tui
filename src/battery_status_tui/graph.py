@@ -35,6 +35,7 @@ HISTORY_SECONDS = 6 * 3600
 FORECAST_SECONDS = 6 * 3600
 TICK_SECONDS = 3600
 GRAPH_OFFSET = 6
+MIN_EARLY_SLOPE = 0.25
 BLOCKS = " ▁▂▃▄▅▆▇█"
 BRAILLE_LEFT_BOTTOM_UP = (0x40, 0x04, 0x02, 0x01)
 BRAILLE_RIGHT_BOTTOM_UP = (0x80, 0x20, 0x10, 0x08)
@@ -68,10 +69,30 @@ def _braille_fill(left_percentage: float, right_percentage: float | None = None)
     right_percentage = left_percentage if right_percentage is None else right_percentage
     left_levels = max(0, min(8, round(left_percentage / 100 * 8)))
     right_levels = max(0, min(8, round(right_percentage / 100 * 8)))
+    return _braille_fill_levels(left_levels, right_levels)
+
+
+def _braille_fill_levels(left_levels: int, right_levels: int) -> tuple[str, str]:
     return (
         _braille_mask(max(0, left_levels - 4), max(0, right_levels - 4)),
         _braille_mask(min(4, left_levels), min(4, right_levels)),
     )
+
+
+def _early_raster(continuous_heights: Sequence[float]) -> list[int]:
+    """Shift clear monotone round() transitions one subcolumn earlier."""
+    rounded = [max(0, min(8, round(height))) for height in continuous_heights]
+    raster = rounded.copy()
+    for index in range(1, len(continuous_heights)):
+        earlier = index - 1
+        if earlier == 0:
+            continue
+        slope = continuous_heights[index] - continuous_heights[earlier]
+        previous_slope = continuous_heights[earlier] - continuous_heights[earlier - 1]
+        if (abs(slope) >= MIN_EARLY_SLOPE and abs(previous_slope) >= MIN_EARLY_SLOPE
+                and slope * previous_slope > 0 and abs(rounded[index] - rounded[earlier]) == 1):
+            raster[earlier] = rounded[index]
+    return raster
 
 
 def _braille_subcolumn_times(bucket_start: float, bucket_duration: int) -> tuple[float, float]:
@@ -174,21 +195,22 @@ def _chart_rows_and_percentages(
             ))
             return pre_percentage + (post_percentage - pre_percentage) * fraction
 
-        for column in columns:
-            if any(
-                interval.started_at <= sample.timestamp < interval.ended_at
-                and _history_column(sample.timestamp, now) == column
-                for sample in history
-            ):
-                continue
+        render_columns = [column for column in columns if not any(
+            interval.started_at <= sample.timestamp < interval.ended_at
+            and _history_column(sample.timestamp, now) == column
+            for sample in history
+        )]
+        subcolumn_percentages = []
+        for column in render_columns:
+            bucket_start = column_timestamp(column, now)
+            left_timestamp, right_timestamp = _braille_subcolumn_times(bucket_start, COLUMN_SECONDS)
+            subcolumn_percentages.extend((sleep_percentage(left_timestamp), sleep_percentage(right_timestamp)))
+        raster = _early_raster([percentage / 100 * 8 for percentage in subcolumn_percentages])
+        for index, column in enumerate(render_columns):
             bucket_start = column_timestamp(column, now)
             center_timestamp = bucket_start + COLUMN_SECONDS / 2
-            left_timestamp, right_timestamp = _braille_subcolumn_times(bucket_start, COLUMN_SECONDS)
-            percentage = sleep_percentage(center_timestamp)
-            top[column], bottom[column] = _braille_fill(
-                sleep_percentage(left_timestamp), sleep_percentage(right_timestamp)
-            )
-            percentages_by_column[column] = percentage
+            top[column], bottom[column] = _braille_fill_levels(*raster[index * 2:index * 2 + 2])
+            percentages_by_column[column] = sleep_percentage(center_timestamp)
 
     top[NOW_INDEX] = "│"
     bottom[NOW_INDEX] = "│"
@@ -210,17 +232,18 @@ def _chart_rows_and_percentages(
             return current.percentage + (target - current.percentage) * fraction
 
         last_column = min(GRAPH_WIDTH - 1, project_column(endpoint, now))
-        for column in range(NOW_INDEX + 1, min(GRAPH_WIDTH, last_column + 1)):
+        forecast_columns = list(range(NOW_INDEX + 1, min(GRAPH_WIDTH, last_column + 1)))
+        subcolumn_percentages = []
+        for column in forecast_columns:
+            bucket_start = column_timestamp(column, now)
+            left_timestamp, right_timestamp = _braille_subcolumn_times(bucket_start, COLUMN_SECONDS)
+            subcolumn_percentages.extend((forecast_percentage(left_timestamp), forecast_percentage(right_timestamp)))
+        raster = _early_raster([percentage / 100 * 8 for percentage in subcolumn_percentages])
+        for index, column in enumerate(forecast_columns):
             bucket_start = column_timestamp(column, now)
             center_timestamp = bucket_start + COLUMN_SECONDS / 2
-            left_timestamp, right_timestamp = _braille_subcolumn_times(bucket_start, COLUMN_SECONDS)
-            percentage = forecast_percentage(center_timestamp)
-            forecast_top, forecast_bottom = _braille_fill(
-                forecast_percentage(left_timestamp), forecast_percentage(right_timestamp)
-            )
-            top[column] = forecast_top
-            bottom[column] = forecast_bottom
-            percentages_by_column[column] = percentage
+            top[column], bottom[column] = _braille_fill_levels(*raster[index * 2:index * 2 + 2])
+            percentages_by_column[column] = forecast_percentage(center_timestamp)
     return "".join(top), "".join(bottom), percentages_by_column
 
 
