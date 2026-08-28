@@ -15,7 +15,16 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .energy_integrity import (
+    ENERGY_PROVENANCE_CHARGE,
+    ENERGY_PROVENANCE_NATIVE,
+    ENERGY_PROVENANCE_REJECTED,
+    MAX_PLAUSIBLE_POWER_W_PER_BATTERY,
+)
+from .recent_series import decode_recent_series
+
 from .schema import V1_SCHEMA_VERSION, V2_REQUIRED_TABLES, create_v1_schema
+from .v1_storage import V1Storage, generation_digest
 
 
 HOUR_MS = 3_600_000
@@ -120,6 +129,8 @@ class SourcePoint:
     boottime: int | None
     boot: str
     identity: str
+    counters: tuple[tuple[str, str, float, float | None], ...] = ()
+    power_rejected: bool = False
 
 
 def _readonly(path: Path) -> sqlite3.Connection:
@@ -205,16 +216,39 @@ def _milliseconds(value: object) -> int | None:
 
 
 def _source_points(source: sqlite3.Connection, report: ValidationReport) -> list[SourcePoint]:
+    raw_counters: dict[int, list[tuple[str, str, float, float | None]] | None] = {}
+    for raw in source.execute("SELECT * FROM battery_samples ORDER BY timestamp,identity,id"):
+        at = int(raw["timestamp"]) * 1_000
+        identity = str(raw["identity"] or raw["device"] or "legacy-unknown")
+        energy = _number(raw["energy_now_wh"])
+        charge = _number(raw["charge_now_ah"])
+        voltage = _number(raw["voltage_now_v"])
+        counter = None
+        if energy is not None and energy >= 0:
+            counter = (identity, "energy", energy, None)
+        elif charge is not None and charge >= 0 and voltage is not None and voltage > 0:
+            counter = (identity, "charge", charge, voltage)
+        values = raw_counters.setdefault(at, [])
+        if counter is None:
+            raw_counters[at] = None
+        elif values is not None:
+            values.append(counter)
     selected: dict[int, SourcePoint] = {}
     for row in source.execute("SELECT * FROM samples ORDER BY timestamp, id"):
         at = int(row["timestamp"]) * 1_000
+        power = _number(row["power_w"])
+        count = max(1, len(raw_counters.get(at) or ()))
+        rejected_power = power is not None and (
+            power < 0 or power > MAX_PLAUSIBLE_POWER_W_PER_BATTERY * count
+        )
         point = SourcePoint(
             at, float(row["percentage"]), str(row["state"]),
             None if row["ac_online"] is None else int(row["ac_online"]),
-            _number(row["power_w"]), bool(row["power_approximate"] or 0),
+            None if rejected_power else power, bool(row["power_approximate"] or 0),
             _number(row["energy_wh"]), _milliseconds(row["monotonic_s"]),
             _milliseconds(row["boottime_s"]), str(row["boot_id"] or "legacy-unknown-boot"),
             str(row["battery_identity"] or row["device"] or "legacy-unknown"),
+            tuple(raw_counters.get(at) or ()), rejected_power,
         )
         if at in selected and selected[at] != point:
             report.add("samples", at, "aggregate_ambiguity", selected[at], point)
@@ -240,6 +274,17 @@ def _is_continuous(left: SourcePoint, right: SourcePoint) -> bool:
             if after < before or abs((after - before) - elapsed) > CLOCK_SKEW_LIMIT_MS:
                 return False
     return True
+
+
+def _source_session_kind(point: SourcePoint) -> str | None:
+    if point.ac == 0:
+        return "discharging"
+    if point.ac == 1:
+        if point.state.lower() == "charging" or point.soc < 100:
+            return "charging"
+        return None
+    state = point.state.lower()
+    return state if state in {"charging", "discharging"} else None
 
 
 def _source_batteries(source: sqlite3.Connection) -> dict[str, tuple[Any, ...]]:
@@ -313,7 +358,7 @@ def _expected_battery_events(source: sqlite3.Connection) -> list[tuple[Any, ...]
                                                str(row["boot_id"] or "legacy-unknown-boot")))
 
     result: list[tuple[Any, ...]] = []
-    last_values: dict[str, tuple[str, float]] = {}
+    last_values: dict[str, str] = {}
     last_raw_set: set[str] | None = None
     for at in sorted(records):
         if at in present_sets:
@@ -325,17 +370,14 @@ def _expected_battery_events(source: sqlite3.Connection) -> list[tuple[Any, ...]
                     last_values.pop(identity, None)
             last_raw_set = current_set
         for identity, state, soc, boot in sorted(records[at]):
-            values = (state, soc)
-            if last_values.get(identity) != values:
+            if last_values.get(identity) != state:
                 old = last_values.get(identity)
                 reason = (1 if old is None else 0)
-                if old is None or old[0] != state:
+                if old is None or old != state:
                     reason |= 2
-                if old is None or old[1] != soc:
-                    reason |= 4
                 result.append((at * 1_000, boot, "battery", identity,
                                None, 1, state, soc, reason, 0))
-                last_values[identity] = values
+                last_values[identity] = state
     return sorted(result, key=lambda item: (item[0], item[2], str(item[3])))
 
 
@@ -451,6 +493,7 @@ HOURLY_FIELDS = (
     "discharge_power_integral_w_ms", "discharge_power_max_w",
     "discharge_power_valid_ms", "direct_power_ms", "estimated_power_ms",
     "unknown_power_ms", "poll_count", "state_event_count", "quality_flags",
+    "energy_provenance_mask",
 )
 
 
@@ -469,7 +512,7 @@ def _blank_hour(hour: int) -> dict[str, Any]:
         "discharge_power_integral_w_ms": 0.0, "discharge_power_max_w": None,
         "discharge_power_valid_ms": 0, "direct_power_ms": 0, "estimated_power_ms": 0,
         "unknown_power_ms": 0, "poll_count": 0, "state_event_count": 0,
-        "quality_flags": 0,
+        "quality_flags": 0, "energy_provenance_mask": 0,
     }
 
 
@@ -512,6 +555,39 @@ def _threshold_duration(start_soc: float, end_soc: float, duration: int,
     return round(duration * (threshold - low) / (high - low))
 
 
+def _independent_energy_delta(left: SourcePoint, right: SourcePoint
+                              ) -> tuple[float | None, int, bool]:
+    if not left.counters or not right.counters:
+        return None, 0, False
+    before = {item[0]: item for item in left.counters}
+    after = {item[0]: item for item in right.counters}
+    if before.keys() != after.keys():
+        return None, ENERGY_PROVENANCE_REJECTED, True
+    elapsed = right.at - left.at
+    total = 0.0
+    provenance = 0
+    direction = _source_session_kind(left)
+    for identity in sorted(before):
+        a, b = before[identity], after[identity]
+        if a[1] != b[1]:
+            return None, ENERGY_PROVENANCE_REJECTED, True
+        if a[1] == "energy":
+            delta = b[2] - a[2]
+            provenance |= ENERGY_PROVENANCE_NATIVE
+        elif a[3] and b[3]:
+            delta = (b[2] - a[2]) * (a[3] + b[3]) / 2
+            provenance |= ENERGY_PROVENANCE_CHARGE
+        else:
+            return None, ENERGY_PROVENANCE_REJECTED, True
+        if ((direction == "charging" and delta < 0)
+                or (direction == "discharging" and delta > 0)
+                or direction is None
+                or abs(delta) * 3_600_000 / elapsed > MAX_PLAUSIBLE_POWER_W_PER_BATTERY):
+            return None, ENERGY_PROVENANCE_REJECTED, True
+        total += delta
+    return total, provenance, False
+
+
 def _accumulate_reference(row: dict[str, Any], left: SourcePoint, right: SourcePoint,
                           start: int, end: int, *, energy_allowed: bool) -> None:
     duration = end - start
@@ -545,28 +621,35 @@ def _accumulate_reference(row: dict[str, Any], left: SourcePoint, right: SourceP
             row[f"{prefix}_power_valid_ms"] += duration
             maximum = f"{prefix}_power_max_w"
             row[maximum] = left.power if row[maximum] is None else max(row[maximum], left.power)
-    if energy_allowed and left.energy is not None and right.energy is not None:
-        delta = right.energy - left.energy
-        valid = (state == "charging" and delta >= 0) or (state == "discharging" and delta <= 0)
-        if valid:
+    if left.power_rejected:
+        row["quality_flags"] |= 8
+    if energy_allowed:
+        delta, provenance, rejected = _independent_energy_delta(left, right)
+        if rejected:
+            row["quality_flags"] |= 4
+            row["energy_provenance_mask"] |= ENERGY_PROVENANCE_REJECTED
+        elif delta is not None:
             portion = delta * duration / whole
             row["charged_energy_wh" if portion >= 0 else "discharged_energy_wh"] += abs(portion)
+            row["energy_provenance_mask"] |= provenance
 
 
 def _expected_hours(source: sqlite3.Connection, points: list[SourcePoint],
-                    expected_events: list[tuple[Any, ...]], raw_sets: dict[int, str]) -> dict[int, dict[str, Any]]:
+                    expected_events: list[tuple[Any, ...]], raw_sets: dict[int, str]
+                    ) -> tuple[dict[int, dict[str, Any]], dict[str, Any]]:
     sleeps = [(int(row[0]) * 1_000, int(row[1]) * 1_000) for row in source.execute(
         "SELECT started_at, ended_at FROM sleep_intervals"
     )]
     timeline = [point.at for point in points] + [value for pair in sleeps for value in pair]
     if not timeline:
-        return {}
+        return {}, {}
     first = min(timeline) // HOUR_MS * HOUR_MS
-    last = max(timeline) // HOUR_MS * HOUR_MS
-    hours = {hour: _blank_hour(hour) for hour in range(first, last + 1, HOUR_MS)}
+    trailing_hour = points[-1].at // HOUR_MS * HOUR_MS
+    hours = {hour: _blank_hour(hour) for hour in range(first, trailing_hour + 1, HOUR_MS)}
     for hour, row in hours.items():
-        row["sleep_ms"] = _union_duration(sleeps, hour, hour + HOUR_MS)
-        row["poll_count"] = sum(hour <= point.at < hour + HOUR_MS for point in points)
+        coverage_end = hour + HOUR_MS if hour < trailing_hour else points[-1].at
+        row["sleep_ms"] = _union_duration(sleeps, hour, coverage_end)
+        row["poll_count"] = sum(hour <= point.at <= coverage_end for point in points)
         row["state_event_count"] = sum(hour <= event[0] < hour + HOUR_MS for event in expected_events)
         sets = [value for at, value in sorted(raw_sets.items()) if hour <= at < hour + HOUR_MS]
         prior = [at for at in raw_sets if at <= hour]
@@ -579,20 +662,116 @@ def _expected_hours(source: sqlite3.Connection, points: list[SourcePoint],
         cursor = left.at
         while cursor < right.at:
             hour = cursor // HOUR_MS * HOUR_MS
+            if hour not in hours:
+                break
             boundary = min(right.at, hour + HOUR_MS)
             for start, end in _active_parts(cursor, boundary, sleeps):
-                _accumulate_reference(hours[hour], left, right, start, end,
-                                      energy_allowed=not crosses_sleep)
+                _accumulate_reference(
+                    hours[hour], left, right, start, end,
+                    energy_allowed=(not crosses_sleep
+                                    and _source_session_kind(left)
+                                    == _source_session_kind(right)),
+                )
             cursor = boundary
     for row in hours.values():
-        row["unknown_ms"] = HOUR_MS - row["observed_ms"] - row["sleep_ms"]
-        row["quality_flags"] = (1 if row["unknown_ms"] else 0) | (2 if row["sleep_ms"] else 0)
-    return hours
+        target = (HOUR_MS if row["hour_start_ms"] < trailing_hour
+                  else points[-1].at - trailing_hour)
+        row["unknown_ms"] = target - row["observed_ms"] - row["sleep_ms"]
+        row["quality_flags"] |= ((1 if row["unknown_ms"] else 0)
+                                 | (2 if row["sleep_ms"] else 0))
+    trailing = hours.pop(trailing_hour)
+    return hours, trailing
 
 
 def _actual_hours(destination: sqlite3.Connection) -> dict[int, dict[str, Any]]:
     return {int(row["hour_start_ms"]): {name: row[name] for name in HOURLY_FIELDS}
             for row in destination.execute("SELECT * FROM hourly_history")}
+
+
+def _check_seed_checkpoint(source: sqlite3.Connection, destination: sqlite3.Connection,
+                           points: list[SourcePoint], trailing: dict[str, Any],
+                           report: ValidationReport) -> None:
+    headers = destination.execute(
+        "SELECT * FROM checkpoint_generations ORDER BY generation"
+    ).fetchall()
+    if len(headers) != 1:
+        report.add("checkpoint_generations", "seed", "count", 1, len(headers))
+        return
+    header = headers[0]
+    latest = points[-1]
+    expected_header = (1, 1, latest.at, latest.at, latest.boot, 1)
+    actual_header = (
+        int(header["generation"]), int(header["format_version"]),
+        int(header["created_at_ms"]), int(header["last_poll_at_ms"]),
+        str(header["boot_id"]), int(header["complete"]),
+    )
+    if actual_header != expected_header:
+        report.add("checkpoint_generations", 1, "header", expected_header, actual_header)
+    try:
+        snapshot = V1Storage._load_generation(V1Storage(Path("unused")), destination, 1)
+        digest = None if snapshot is None else generation_digest(snapshot)
+        if digest != str(header["payload_digest"]):
+            report.add("checkpoint_generations", 1, "payload_digest",
+                       str(header["payload_digest"]), digest)
+    except (ValueError, sqlite3.Error) as error:
+        report.add("checkpoint_generations", 1, "payload", "valid", str(error))
+
+    try:
+        recent = decode_recent_series(bytes(header["recent_series"]))
+        if not recent:
+            report.add("checkpoint_generations", 1, "recent_series", "non-empty", 0)
+        else:
+            last = recent[-1]
+            expected_last = (latest.at, round(latest.soc * 1_000))
+            actual_last = (last.timestamp_ms, last.soc_millipercent)
+            if actual_last != expected_last:
+                report.add("checkpoint_generations", 1, "recent_last",
+                           expected_last, actual_last)
+            if len(recent) > 480 or recent[-1].timestamp_ms - recent[0].timestamp_ms > 8 * HOUR_MS:
+                report.add("checkpoint_generations", 1, "recent_window", "<=8h/480", len(recent))
+    except ValueError as error:
+        report.add("checkpoint_generations", 1, "recent_series", "valid", str(error))
+
+    row = destination.execute(
+        "SELECT * FROM checkpoint_hourly WHERE generation=1"
+    ).fetchone()
+    if row is None:
+        report.add("checkpoint_hourly", 1, "row", "present", None)
+    else:
+        mapping = {
+            "hour_start_ms": "hour_start_ms", "soc_first": "soc_start",
+            "soc_last": "soc_end", "soc_min": "soc_min", "soc_max": "soc_max",
+        }
+        fields = (
+            "soc_integral_percent_ms", "charged_energy_wh", "discharged_energy_wh",
+            "observed_ms", "sleep_ms", "unknown_ms", "charging_ms", "discharging_ms",
+            "full_ms", "other_state_ms", "ac_online_ms", "ac_offline_ms",
+            "ac_unknown_ms", "under_20_ms", "above_80_ms", "above_95_ms",
+            "full_on_ac_ms", "charge_power_integral_w_ms", "charge_power_max_w",
+            "charge_power_valid_ms", "discharge_power_integral_w_ms",
+            "discharge_power_max_w", "discharge_power_valid_ms", "direct_power_ms",
+            "estimated_power_ms", "unknown_power_ms", "poll_count", "state_event_count",
+            "quality_flags", "energy_provenance_mask",
+        )
+        for actual_name, expected_name in tuple(mapping.items()) + tuple((name, name) for name in fields):
+            if not _equal(trailing[expected_name], row[actual_name], expected_name):
+                report.add("checkpoint_hourly", 1, actual_name,
+                           trailing[expected_name], row[actual_name])
+
+    raw = source.execute(
+        "SELECT identity,device,state,percentage FROM battery_samples WHERE timestamp=?",
+        (latest.at // 1_000,),
+    ).fetchall()
+    expected_batteries = sorted(
+        (str(item[0] or item[1] or "legacy-unknown"), str(item[2]), float(item[3]))
+        for item in raw
+    ) or [(latest.identity, latest.state, latest.soc)]
+    actual_batteries = sorted(tuple(item) for item in destination.execute(
+        "SELECT b.identity,c.state,c.soc_percent FROM checkpoint_batteries c "
+        "JOIN batteries b ON b.id=c.battery_id WHERE c.generation=1"
+    ))
+    if expected_batteries != actual_batteries:
+        report.add("checkpoint_batteries", 1, "rows", expected_batteries, actual_batteries)
 
 
 def _equal(expected: Any, actual: Any, field_name: str) -> bool:
@@ -644,6 +823,8 @@ def validate_pre_v1_conversion(source_path: Path, destination_path: Path) -> Val
     try:
         source = _readonly(Path(source_path))
         destination = _readonly(Path(destination_path))
+        source.execute("BEGIN")
+        destination.execute("BEGIN")
         source_ok = _check_database(source, "source", 2, V2_REQUIRED_TABLES, report)
         destination_ok = _check_database(destination, "destination", V1_SCHEMA_VERSION,
                                          required_v4, report)
@@ -702,10 +883,11 @@ def validate_pre_v1_conversion(source_path: Path, destination_path: Path) -> Val
         _compare_rows(report, "battery_health", expected_health, actual_health)
         report.checked_health_events = len(expected_health)
 
-        expected_hours = _expected_hours(source, points, expected_events, sets)
+        expected_hours, trailing = _expected_hours(source, points, expected_events, sets)
         actual_hours = _actual_hours(destination)
         _compare_hours(report, expected_hours, actual_hours)
         report.checked_hours = len(expected_hours)
+        _check_seed_checkpoint(source, destination, points, trailing, report)
 
         profiles = destination.execute(
             "SELECT hour_start_ms, profile, duration_ms FROM hourly_profile_durations"

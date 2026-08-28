@@ -205,6 +205,8 @@ V1_CREATE_STATEMENTS = (
         poll_count INTEGER NOT NULL CHECK(poll_count >= 0),
         state_event_count INTEGER NOT NULL CHECK(state_event_count >= 0),
         quality_flags INTEGER NOT NULL DEFAULT 0 CHECK(quality_flags >= 0),
+        energy_provenance_mask INTEGER NOT NULL DEFAULT 0
+            CHECK(energy_provenance_mask >= 0),
         CHECK(hour_start_ms >= 0 AND hour_start_ms % 3600000 = 0),
         CHECK(finalized_at_ms IS NULL OR finalized_at_ms >= hour_start_ms + 3600000),
         CHECK(is_final = 0 OR finalized_at_ms IS NOT NULL),
@@ -378,6 +380,7 @@ V1_CREATE_STATEMENTS = (
         poll_count INTEGER NOT NULL CHECK(poll_count >= 0),
         state_event_count INTEGER NOT NULL CHECK(state_event_count >= 0),
         quality_flags INTEGER NOT NULL CHECK(quality_flags >= 0),
+        energy_provenance_mask INTEGER NOT NULL DEFAULT 0 CHECK(energy_provenance_mask >= 0),
         PRIMARY KEY(generation, hour_start_ms),
         CHECK(hour_start_ms >= 0 AND hour_start_ms % 3600000 = 0),
         CHECK(observed_ms + sleep_ms + unknown_ms <= 3600000),

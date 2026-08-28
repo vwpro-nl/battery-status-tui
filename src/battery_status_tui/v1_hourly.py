@@ -9,6 +9,8 @@ from dataclasses import dataclass, field, fields
 HOUR_MS = 3_600_000
 QUALITY_UNKNOWN = 1
 QUALITY_SLEEP = 2
+QUALITY_ENERGY_REJECTED = 4
+QUALITY_POWER_REJECTED = 8
 
 
 def utc_hour(timestamp_ms: int) -> int:
@@ -70,12 +72,14 @@ class HourlyAccumulator:
     poll_count: int = 0
     state_event_count: int = 0
     quality_flags: int = 0
+    energy_provenance_mask: int = 0
     profiles: dict[str, int] = field(default_factory=dict)
 
     def add_observed(self, duration: int, start_soc: float, end_soc: float,
                      state: str, ac_online: bool | None, power_w: float | None,
                      approximate: bool, profile: str | None,
-                     energy_delta_wh: float | None = None) -> None:
+                     energy_delta_wh: float | None = None,
+                     energy_provenance_mask: int = 0) -> None:
         if duration <= 0:
             return
         if self.covered_ms + duration > HOUR_MS:
@@ -127,6 +131,7 @@ class HourlyAccumulator:
                 setattr(self, valid, getattr(self, valid) + duration)
                 old_max = getattr(self, maximum)
                 setattr(self, maximum, power_w if old_max is None else max(old_max, power_w))
+        self.energy_provenance_mask |= energy_provenance_mask
         if energy_delta_wh is not None:
             if energy_delta_wh >= 0:
                 self.charged_energy_wh += energy_delta_wh

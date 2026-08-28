@@ -89,6 +89,33 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(measurement.percentage, 37.5)
         self.assertEqual(measurement.power_w, 8)
 
+    def test_transient_optional_identity_loss_keeps_stable_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            battery = root / "BAT0"
+            self._supply(battery, type="Battery", capacity="50", status="Discharging",
+                         model_name="PrimaryPack", serial_number="ABC123")
+            source = SysfsSource(root)
+            first = source.read_raw(100)[0]
+            (battery / "model_name").unlink()
+            (battery / "serial_number").unlink()
+            second = source.read_raw(101)[0]
+        self.assertEqual(first.identity, second.identity)
+        self.assertEqual(first.identity, "BAT0|PrimaryPack|ABC123")
+
+    def test_changed_nonempty_identity_detects_battery_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            battery = root / "BAT0"
+            self._supply(battery, type="Battery", capacity="50", status="Discharging",
+                         model_name="PrimaryPack", serial_number="ABC123")
+            source = SysfsSource(root)
+            first = source.read_raw(100)[0]
+            (battery / "serial_number").write_text("XYZ789", encoding="utf-8")
+            second = source.read_raw(101)[0]
+        self.assertNotEqual(first.identity, second.identity)
+        self.assertEqual(second.identity, "BAT0|PrimaryPack|XYZ789")
+
     @staticmethod
     def _supply(path: Path, **values: str) -> None:
         path.mkdir()

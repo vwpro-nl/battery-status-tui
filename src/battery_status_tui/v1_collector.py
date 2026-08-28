@@ -6,6 +6,12 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Callable, Iterable
 
+from .energy_integrity import (
+    EnergyCounter,
+    compatible_delta,
+    counters_from_raw,
+    plausible_power,
+)
 from .models import Measurement, RawBatterySnapshot, SleepInterval
 from .recent_series import (
     MAX_WINDOW_MS,
@@ -16,7 +22,13 @@ from .recent_series import (
     decode_recent_series,
     encode_recent_series,
 )
-from .v1_hourly import HOUR_MS, HourlyAccumulator, utc_hour
+from .v1_hourly import (
+    HOUR_MS,
+    QUALITY_ENERGY_REJECTED,
+    QUALITY_POWER_REJECTED,
+    HourlyAccumulator,
+    utc_hour,
+)
 from .v1_storage import BatteryCheckpoint, GenerationSnapshot, RecoverySelection, V1Storage
 
 
@@ -42,6 +54,10 @@ class PollResult:
     health_events: int
 
 
+class V1CollectorError(ValueError):
+    """A poll cannot safely be persisted in schema v4."""
+
+
 @dataclass(frozen=True, slots=True)
 class _PollState:
     timestamp_ms: int
@@ -59,6 +75,8 @@ class _PollState:
     boottime_ns: int
     battery_set_key: str
     profile: str | None
+    energy_counters: tuple[EnergyCounter, ...]
+    power_rejected: bool
 
 
 def _insert(db: sqlite3.Connection, table: str, values: dict[str, object]) -> int:
@@ -77,6 +95,13 @@ def _battery_set(measurement: Measurement) -> str:
 
 
 def _state(measurement: Measurement, profile: str | None) -> _PollState:
+    percentages = [measurement.percentage]
+    percentages.extend(item.percentage for item in measurement.raw_batteries)
+    if any(not 0 <= value <= 100 for value in percentages):
+        raise V1CollectorError(
+            f"battery SoC {measurement.percentage!r} is outside the valid 0..100 "
+            "percent range; poll was not stored"
+        )
     monotonic = measurement.monotonic_s
     boottime = measurement.boottime_s
     if monotonic is None and measurement.raw_batteries:
@@ -85,13 +110,17 @@ def _state(measurement: Measurement, profile: str | None) -> _PollState:
         boottime = max(item.boottime_s for item in measurement.raw_batteries)
     if monotonic is None or boottime is None or not measurement.boot_id:
         raise ValueError("schema-v4 poll requires boot, monotonic, and boottime clocks")
+    power, power_rejected = plausible_power(
+        measurement.power_w, len(measurement.raw_batteries)
+    )
     return _PollState(
         measurement.timestamp * 1_000, measurement.percentage, measurement.state,
-        measurement.session_kind, measurement.ac_online, measurement.power_w,
+        measurement.session_kind, measurement.ac_online, power,
         measurement.power_approximate, measurement.power_method,
         measurement.power_confidence, measurement.energy_wh, measurement.boot_id,
         round(monotonic * 1_000_000_000), round(boottime * 1_000_000_000),
-        _battery_set(measurement), profile,
+        _battery_set(measurement), profile, counters_from_raw(measurement.raw_batteries),
+        power_rejected,
     )
 
 
@@ -102,8 +131,13 @@ def _state_from_checkpoint(snapshot: GenerationSnapshot) -> _PollState:
     point = points[-1]
     states = {item.state for item in snapshot.batteries if item.present}
     state = states.pop() if len(states) == 1 else "other"
-    energies = [item.energy_now_wh for item in snapshot.batteries if item.present]
-    energy = sum(energies) if energies and all(value is not None for value in energies) else None
+    raw = tuple(RawBatterySnapshot(
+        snapshot.last_poll_at_ms // 1_000, snapshot.monotonic_ns / 1_000_000_000,
+        snapshot.boottime_ns / 1_000_000_000, snapshot.boot_id,
+        item.identity, item.identity, item.soc_percent, item.state, snapshot.ac_online,
+        voltage_now_v=item.voltage_now_v, energy_now_wh=item.energy_now_wh,
+        charge_now_ah=item.charge_now_ah,
+    ) for item in snapshot.batteries if item.present)
     ac = snapshot.ac_online
     session_kind = "discharging" if ac is False else (
         "charging" if ac is True and (state == "charging" or point.soc_millipercent < 100_000)
@@ -112,9 +146,9 @@ def _state_from_checkpoint(snapshot: GenerationSnapshot) -> _PollState:
     return _PollState(
         snapshot.last_poll_at_ms, point.soc_millipercent / 1_000, state, session_kind,
         ac, None if point.resolved_power_mw is None else point.resolved_power_mw / 1_000,
-        bool(point.flags & 0x20), "unavailable", "none", energy, snapshot.boot_id,
+        bool(point.flags & 0x20), "unavailable", "none", None, snapshot.boot_id,
         snapshot.monotonic_ns, snapshot.boottime_ns,
-        point.battery_set_key, snapshot.power_profile,
+        point.battery_set_key, snapshot.power_profile, counters_from_raw(raw), False,
     )
 
 
@@ -203,18 +237,6 @@ def _continuity(previous: _PollState, current: _PollState,
     return True, "continuous"
 
 
-def _energy_delta(previous: _PollState, current: _PollState,
-                  valid: bool, crosses_sleep: bool) -> float | None:
-    if not valid or crosses_sleep or previous.energy_wh is None or current.energy_wh is None:
-        return None
-    delta = current.energy_wh - previous.energy_wh
-    if previous.session_kind == "charging" and delta >= 0:
-        return delta
-    if previous.session_kind == "discharging" and delta <= 0:
-        return delta
-    return None
-
-
 def _recent_flags(state: _PollState, *, broken: bool) -> int:
     ac = 0 if state.ac_online is None else 2 if state.ac_online else 1
     method = METHODS.get(state.power_method, 0) << POWER_METHOD_SHIFT
@@ -288,7 +310,13 @@ class V1Collector:
             crosses_sleep = bool(previous and _overlap_ms(
                 sleep_ranges, previous.timestamp_ms, current.timestamp_ms
             ))
-            delta = None if previous is None else _energy_delta(previous, current, valid, crosses_sleep)
+            energy_result = (None if previous is None or not valid or crosses_sleep else
+                             compatible_delta(
+                                 previous.energy_counters, current.energy_counters,
+                                 elapsed_ms=current.timestamp_ms - previous.timestamp_ms,
+                                 direction=previous.session_kind,
+                             ))
+            delta = None if energy_result is None else energy_result.value_wh
             points = list(decode_recent_series(
                 recovery.snapshot.recent_series if recovery.snapshot else encode_recent_series(())
             ))
@@ -304,7 +332,7 @@ class V1Collector:
             ))
             series = encode_recent_series(points)
             checkpoint_batteries = self._checkpoint_batteries(
-                measurement, battery_ids
+                measurement, current, battery_ids
             )
             snapshot = GenerationSnapshot(
                 generation, current.timestamp_ms, current.timestamp_ms, current.boot_id,
@@ -371,13 +399,12 @@ class V1Collector:
                 "WHERE scope='battery' AND battery_id=? ORDER BY occurred_at_ms DESC,id DESC LIMIT 1",
                 (battery_id,),
             ).fetchone()
-            desired = (1, item.state, item.percentage)
-            if last is None or tuple(last) != desired:
+            desired = (1, item.state)
+            previous_state = None if last is None else (last[0], last[1])
+            if previous_state != desired:
                 reason = (1 if last is None or not last[0] else 0)
                 if last is None or last[1] != item.state:
                     reason |= 2
-                if last is None or last[2] != item.percentage:
-                    reason |= 4
                 _insert(db, "state_events", {
                     "occurred_at_ms": current.timestamp_ms, "boot_id": current.boot_id,
                     "scope": "battery", "battery_id": battery_id,
@@ -551,7 +578,12 @@ class V1Collector:
         if not valid:
             warnings.append(f"continuity boundary classified unknown: {reason}")
         crosses_sleep = _overlap_ms(sleeps, previous.timestamp_ms, current.timestamp_ms) > 0
-        energy = _energy_delta(previous, current, valid, crosses_sleep)
+        energy_result = (None if not valid or crosses_sleep else compatible_delta(
+            previous.energy_counters, current.energy_counters,
+            elapsed_ms=current.timestamp_ms - previous.timestamp_ms,
+            direction=previous.session_kind,
+        ))
+        energy = None if energy_result is None else energy_result.value_wh
         total = current.timestamp_ms - previous.timestamp_ms
         for start, end, sleeping in _parts(previous.timestamp_ms, current.timestamp_ms, sleeps):
             cursor = start
@@ -559,6 +591,10 @@ class V1Collector:
                 hour = utc_hour(cursor)
                 boundary = min(end, hour + HOUR_MS)
                 item = accumulators.setdefault(hour, HourlyAccumulator(hour, previous.battery_set_key))
+                if previous.power_rejected:
+                    item.quality_flags |= QUALITY_POWER_REJECTED
+                if energy_result is not None and energy_result.rejected:
+                    item.quality_flags |= QUALITY_ENERGY_REJECTED
                 duration = boundary - cursor
                 if sleeping:
                     item.add_sleep(duration)
@@ -575,6 +611,7 @@ class V1Collector:
                     item.add_observed(
                         duration, start_soc, end_soc, previous.state, previous.ac_online,
                         previous.power_w, previous.approximate, previous.profile, delta,
+                        0 if energy_result is None else energy_result.provenance_mask,
                     )
                 cursor = boundary
         return accumulators
@@ -606,14 +643,14 @@ class V1Collector:
             )
 
     @staticmethod
-    def _checkpoint_batteries(measurement: Measurement,
+    def _checkpoint_batteries(measurement: Measurement, current: _PollState,
                               ids: dict[str, int]) -> tuple[BatteryCheckpoint, ...]:
         single = len(measurement.raw_batteries) == 1
         return tuple(BatteryCheckpoint(
             ids[item.identity], item.identity, True, item.state, item.percentage,
             item.power_now_w, item.current_now_a, item.voltage_now_v, item.energy_now_wh,
             item.charge_now_ah, item.upower_energy_rate_w,
-            measurement.power_w if single else None,
+            current.power_w if single else None,
             measurement.power_method if single else None,
             measurement.power_approximate if single else None,
             measurement.power_confidence if single else None,

@@ -8,8 +8,14 @@ from pathlib import Path
 
 from battery_status_tui.models import Measurement, RawBatterySnapshot, SleepInterval
 from battery_status_tui.recent_series import MAX_WINDOW_MS, decode_recent_series
-from battery_status_tui.v1_collector import V1Collector
+from battery_status_tui.energy_integrity import (
+    ENERGY_PROVENANCE_NATIVE,
+    ENERGY_PROVENANCE_REJECTED,
+)
+from battery_status_tui.v1_collector import V1Collector, V1CollectorError
+from battery_status_tui.v1_hourly import QUALITY_ENERGY_REJECTED
 from battery_status_tui.v1_hourly import HOUR_MS
+from battery_status_tui.v1_runtime import _stabilize_identities
 from battery_status_tui.v1_storage import MAX_GENERATIONS, V1Storage
 
 
@@ -62,6 +68,20 @@ class V1RuntimeTests(unittest.TestCase):
             with self.assertRaises(sqlite3.OperationalError):
                 db.execute("INSERT INTO metadata VALUES('x','y')")
 
+    def test_checkpoint_identity_survives_transient_metadata_loss(self) -> None:
+        previous = measurement(3_600).raw_batteries[0]
+        previous = replace(previous, identity="BAT0|PrimaryPack|ABC123")
+        missing = replace(previous, identity="BAT0||", timestamp=3_660)
+        replacement = replace(previous, identity="BAT0|PrimaryPack|XYZ789", timestamp=3_660)
+        self.assertEqual(
+            _stabilize_identities((missing,), (previous,))[0].identity,
+            previous.identity,
+        )
+        self.assertEqual(
+            _stabilize_identities((replacement,), (previous,))[0].identity,
+            replacement.identity,
+        )
+
     def test_cold_start_writes_complete_checkpoint_but_no_poll_history(self) -> None:
         result = self.collector.process_poll(measurement(3_600))
         self.assertTrue(any("cold start" in warning for warning in result.warnings))
@@ -96,8 +116,15 @@ class V1RuntimeTests(unittest.TestCase):
         changed = measurement(3_720, soc=59.0, energy=39.8)
         raw = replace(changed.raw_batteries[0], energy_full_wh=49.0)
         self.collector.process_poll(replace(changed, raw_batteries=(raw,)))
-        self.assertEqual(len(self.rows("state_events")), 3)
+        self.assertEqual(len(self.rows("state_events")), 2)
         self.assertEqual(len(self.rows("battery_health")), 2)
+
+    def test_soc_only_change_does_not_create_permanent_state_event(self) -> None:
+        self.collector.process_poll(measurement(3_600, soc=60))
+        self.collector.process_poll(measurement(3_660, soc=59, energy=39.9))
+        self.assertEqual(len(self.rows("state_events")), 2)
+        points = decode_recent_series(self.storage.recover().snapshot.recent_series)
+        self.assertEqual([point.soc_millipercent for point in points], [60_000, 59_000])
 
     def test_cleanup_keeps_at_most_three_valid_generations(self) -> None:
         for index in range(5):
@@ -160,7 +187,39 @@ class V1RuntimeTests(unittest.TestCase):
         self.assertEqual(hourly.observed_ms, 60_000)
         self.assertEqual(hourly.discharging_ms, 60_000)
         self.assertAlmostEqual(hourly.discharged_energy_wh, 0.2)
+        self.assertEqual(hourly.energy_provenance_mask, ENERGY_PROVENANCE_NATIVE)
         self.assertEqual(hourly.profiles, {})
+
+    def test_implausible_energy_delta_is_rejected_not_clamped(self) -> None:
+        self.collector.process_poll(measurement(3_600, energy=40.0))
+        self.collector.process_poll(measurement(3_660, soc=59, energy=20.0))
+        hourly = self.storage.recover().snapshot.hourly
+        self.assertEqual(hourly.discharged_energy_wh, 0)
+        self.assertTrue(hourly.quality_flags & QUALITY_ENERGY_REJECTED)
+        self.assertTrue(hourly.energy_provenance_mask & ENERGY_PROVENANCE_REJECTED)
+
+    def test_switching_counter_provenance_rejects_energy_delta(self) -> None:
+        first = measurement(3_600, energy=40.0)
+        second = measurement(3_660, soc=59, energy=None)
+        raw = replace(second.raw_batteries[0], energy_now_wh=None,
+                      charge_now_ah=3.0, voltage_now_v=12.0)
+        second = replace(second, energy_wh=None, raw_batteries=(raw,))
+        self.collector.process_poll(first)
+        self.collector.process_poll(second)
+        hourly = self.storage.recover().snapshot.hourly
+        self.assertEqual(hourly.discharged_energy_wh, 0)
+        self.assertTrue(hourly.quality_flags & QUALITY_ENERGY_REJECTED)
+
+    def test_invalid_soc_preserves_previous_checkpoint(self) -> None:
+        self.collector.process_poll(measurement(3_600, soc=60))
+        before = self.storage.recover().snapshot
+        counts = {table: len(self.rows(table)) for table in
+                  ("checkpoint_generations", "state_events", "hourly_history")}
+        with self.assertRaisesRegex(V1CollectorError, "SoC 101"):
+            self.collector.process_poll(measurement(3_660, soc=101))
+        after = self.storage.recover().snapshot
+        self.assertEqual(after.generation, before.generation)
+        self.assertEqual(counts, {table: len(self.rows(table)) for table in counts})
 
     def test_invalid_boundaries_are_unknown_and_do_not_integrate_energy(self) -> None:
         cases = (

@@ -10,6 +10,7 @@ from pathlib import Path
 from battery_status_tui.sources import BatterySource, SourceUnavailable
 from battery_status_tui.system_status import PowerProfileResolver
 from battery_status_tui.v1_history import V1HistoryError
+from battery_status_tui.v1_collector import V1CollectorError
 from battery_status_tui.v1_runtime import collect_v1, render_v1
 from battery_status_tui.v1_storage import V1Storage, V1StorageError
 
@@ -36,7 +37,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         print(render_v1(storage, current=measurement))
         return 0
-    except (SourceUnavailable, V1HistoryError, V1StorageError) as error:
+    except (SourceUnavailable, V1CollectorError, V1HistoryError, V1StorageError) as error:
         print(f"battery-status-tui v1 trial: {error}", file=sys.stderr)
         return 1
 

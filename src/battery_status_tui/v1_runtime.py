@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable, Iterable
+from dataclasses import replace
 
 from .estimate import estimate_remaining
 from .graph import HISTORY_SECONDS, render_dashboard
@@ -33,6 +34,36 @@ def _snapshot_raw(snapshot: GenerationSnapshot) -> tuple[RawBatterySnapshot, ...
 def _checkpoint_raw_history(storage: V1Storage) -> tuple[RawBatterySnapshot, ...]:
     snapshots = reversed(storage.valid_generations())
     return tuple(item for snapshot in snapshots for item in _snapshot_raw(snapshot))
+
+
+def _identity_parts(identity: str) -> tuple[str, str, str] | None:
+    values = identity.split("|", 2)
+    return tuple(values) if len(values) == 3 else None
+
+
+def _stabilize_identities(
+    current: tuple[RawBatterySnapshot, ...],
+    previous: tuple[RawBatterySnapshot, ...],
+) -> tuple[RawBatterySnapshot, ...]:
+    """Reuse prior optional metadata unless new non-empty metadata conflicts."""
+    prior = {}
+    for item in previous:
+        parts = _identity_parts(item.identity)
+        if parts is not None:
+            prior[parts[0]] = (item.identity, parts[1], parts[2])
+    result = []
+    for item in current:
+        parts = _identity_parts(item.identity)
+        old = None if parts is None else prior.get(parts[0])
+        if old is not None:
+            _, model, serial = parts
+            old_identity, old_model, old_serial = old
+            conflict = ((model and old_model and model != old_model)
+                        or (serial and old_serial and serial != old_serial))
+            if not conflict:
+                item = replace(item, identity=old_identity)
+        result.append(item)
+    return tuple(result)
 
 
 def _new_sleep_intervals(previous: tuple[RawBatterySnapshot, ...],
@@ -67,7 +98,7 @@ def collect_v1(source: BatterySource, storage: V1Storage, *, timestamp: int | No
     for item in history:
         latest_by_identity[item.identity] = item
     previous = tuple(latest_by_identity.values())
-    raw = source.read_raw(now)
+    raw = _stabilize_identities(source.read_raw(now), previous)
     new_sleeps = _new_sleep_intervals(previous, raw, journal_lookup)
     with storage.reader() as db:
         stored_sleeps = tuple(

@@ -6,7 +6,9 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from battery_status_tui import pre_v1_validator
 from battery_status_tui.pre_v1_converter import convert_v2_to_v1
 from battery_status_tui.pre_v1_validator import validate_pre_v1_conversion
 from battery_status_tui.storage import Storage
@@ -58,7 +60,7 @@ class PreV1ValidatorTests(unittest.TestCase):
         self.assertEqual(report.checked_batteries, 3)
         self.assertEqual(report.checked_sessions, 3)
         self.assertEqual(report.checked_sleeps, 2)
-        self.assertEqual(report.checked_hours, 7)
+        self.assertEqual(report.checked_hours, 6)
         self.assertGreater(report.totals["sleep_ms"], 0)
         self.assertIn("PASS", report.to_text())
         self.assertEqual(json.loads(report.to_json())["result"], "PASS")
@@ -127,6 +129,38 @@ class PreV1ValidatorTests(unittest.TestCase):
             "FROM hourly_history WHERE sleep_ms=3600000)"
         )
         self._assert_failure("hourly_history", "discharged_energy_wh")
+
+    def test_finalized_trailing_partial_hour_is_detected(self):
+        db = sqlite3.connect(self.destination)
+        try:
+            row = db.execute("SELECT * FROM checkpoint_hourly WHERE generation=1").fetchone()
+            columns = [item[1] for item in db.execute("PRAGMA table_info(hourly_history)")]
+            checkpoint_columns = [item[1] for item in db.execute(
+                "PRAGMA table_info(checkpoint_hourly)"
+            )]
+            values = dict(zip(checkpoint_columns, row))
+            values["soc_start"] = values["soc_first"]
+            values["soc_end"] = values["soc_last"]
+            values["unknown_ms"] += 3_600_000 - (
+                values["observed_ms"] + values["sleep_ms"] + values["unknown_ms"]
+            )
+            insert_columns = [name for name in columns if name in values]
+            insert_values = [values[name] for name in insert_columns]
+            db.execute(
+                f"INSERT INTO hourly_history({','.join(insert_columns)},finalized_at_ms,"
+                "revision,source_generation,aggregation_version,is_final) VALUES("
+                f"{','.join('?' for _ in insert_columns)},?,1,1,1,1)",
+                insert_values + [values["hour_start_ms"] + 3_600_000]
+            )
+            db.commit()
+        finally:
+            db.close()
+        self._assert_failure("hourly_history")
+
+    def test_invalid_seed_checkpoint_is_detected(self):
+        self._mutate("UPDATE checkpoint_generations SET payload_digest=? WHERE generation=1",
+                     ("0" * 64,))
+        self._assert_failure("checkpoint_generations")
 
     def test_wrong_power_statistics_and_provenance_are_detected(self):
         self._mutate(
@@ -228,6 +262,19 @@ class PreV1ValidatorTests(unittest.TestCase):
         failed = subprocess.run(command, check=False, capture_output=True, text=True)
         self.assertEqual(failed.returncode, 1, failed.stderr)
         self.assertEqual(json.loads(failed.stdout)["result"], "FAIL")
+
+    def test_validator_holds_one_source_read_snapshot(self):
+        original = pre_v1_validator._check_database
+
+        def assert_transaction(db, label, *args, **kwargs):
+            if label == "source":
+                self.assertTrue(db.in_transaction)
+            return original(db, label, *args, **kwargs)
+
+        with mock.patch.object(pre_v1_validator, "_check_database",
+                               side_effect=assert_transaction):
+            report = validate_pre_v1_conversion(self.source, self.destination)
+        self.assertTrue(report.passed, report.to_text())
 
 
 if __name__ == "__main__":

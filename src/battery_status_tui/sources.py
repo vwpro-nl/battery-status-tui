@@ -45,6 +45,26 @@ def _clocks() -> tuple[float, float]:
     mono = time.clock_gettime(time.CLOCK_MONOTONIC)
     return mono, time.clock_gettime(getattr(time, "CLOCK_BOOTTIME", time.CLOCK_MONOTONIC))
 
+
+def _stable_identity(cache: dict[str, tuple[str, str, str]], base: str,
+                     model: str | None, serial: str | None) -> str:
+    """Keep optional identity metadata sticky, but detect real non-empty changes."""
+    current_model, current_serial = model or "", serial or ""
+    previous = cache.get(base)
+    if previous is None:
+        identity = "|".join((base, current_model, current_serial))
+        cache[base] = (current_model, current_serial, identity)
+        return identity
+    old_model, old_serial, identity = previous
+    conflict = ((current_model and old_model and current_model != old_model)
+                or (current_serial and old_serial and current_serial != old_serial))
+    merged_model = current_model or old_model
+    merged_serial = current_serial or old_serial
+    if conflict:
+        identity = "|".join((base, merged_model, merged_serial))
+    cache[base] = (merged_model, merged_serial, identity)
+    return identity
+
 def _parse_upower_devices(output: str) -> list[dict[str, str]]:
     devices, current = [], None
     for raw in output.splitlines():
@@ -60,6 +80,7 @@ def _parse_upower_devices(output: str) -> list[dict[str, str]]:
 class UPowerSource:
     def __init__(self, runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run):
         self.runner = runner
+        self._identities: dict[str, tuple[str, str, str]] = {}
 
     def read_fields(self) -> tuple[dict[str, dict[str, str]], bool | None]:
         try:
@@ -103,7 +124,9 @@ class UPowerSource:
             state, rate = _state(item.get("state")), _number(item.get("energy-rate"))
             if state in {"charging", "discharging"} and (rate is None or rate <= 0):
                 rate = None
-            identity = "|".join((device, item.get("model", ""), item.get("serial", "")))
+            identity = _stable_identity(
+                self._identities, device, item.get("model"), item.get("serial")
+            )
             snapshots.append(RawBatterySnapshot(timestamp, mono, boot, _boot_id(), device, identity,
                 percentage, state, online, voltage_now_v=_number(item.get("voltage")),
                 energy_now_wh=_number(item.get("energy")), energy_full_wh=_number(item.get("energy-full")),
@@ -121,6 +144,7 @@ class UPowerSource:
 class SysfsSource:
     def __init__(self, root: Path = Path("/sys/class/power_supply")):
         self.root = root
+        self._identities: dict[str, tuple[str, str, str]] = {}
 
     def read_raw(self, now: int | None = None) -> tuple[RawBatterySnapshot, ...]:
         timestamp, (mono, boot) = int(time.time()) if now is None else now, _clocks()
@@ -142,7 +166,10 @@ class SysfsSource:
             percentage = _number(_read(battery / "capacity"))
             if percentage is None:
                 continue
-            identity = "|".join((battery.name, _read(battery / "model_name") or "", _read(battery / "serial_number") or ""))
+            identity = _stable_identity(
+                self._identities, battery.name, _read(battery / "model_name"),
+                _read(battery / "serial_number"),
+            )
             cycle = _number(_read(battery / "cycle_count"))
             snapshots.append(RawBatterySnapshot(timestamp, mono, boot, _boot_id(), battery.name, identity, percentage,
                 _state(_read(battery / "status")), online, power_now_w=_micro(battery / "power_now"),

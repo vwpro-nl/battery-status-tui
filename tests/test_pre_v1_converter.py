@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from battery_status_tui import pre_v1_converter
+from battery_status_tui.models import Measurement, RawBatterySnapshot
 from battery_status_tui.pre_v1_converter import (
     AggregateSample,
     HourAccumulator,
@@ -18,6 +19,9 @@ from battery_status_tui.pre_v1_converter import (
     _continuous,
     convert_v2_to_v1,
 )
+from battery_status_tui.v1_history import V1History
+from battery_status_tui.v1_collector import V1Collector
+from battery_status_tui.v1_storage import V1Storage
 from battery_status_tui.storage import Storage
 
 
@@ -94,8 +98,9 @@ class PreV1ConverterTests(unittest.TestCase):
                 "GROUP BY occurred_at_ms, scope, battery_id HAVING count > 1"
             ).fetchall()
             self.assertEqual(duplicates, [])
-            # Aggregate-only battery-b sample still creates a state change.
-            self.assertIsNotNone(db.execute(
+            # Aggregate-only SoC changes are retained in recent/hourly data,
+            # not promoted to permanent state events.
+            self.assertIsNone(db.execute(
                 "SELECT 1 FROM state_events e JOIN batteries b ON b.id=e.battery_id "
                 "WHERE b.identity='battery-b' AND e.occurred_at_ms=1704088860000"
             ).fetchone())
@@ -152,7 +157,7 @@ class PreV1ConverterTests(unittest.TestCase):
     def test_hourly_rows_close_exactly_and_partial_hours_are_unknown(self):
         with self._convert() as db:
             rows = db.execute("SELECT * FROM hourly_history ORDER BY hour_start_ms").fetchall()
-            self.assertGreaterEqual(len(rows), 7)
+            self.assertEqual(len(rows), 6)
             for row in rows:
                 self.assertEqual(row["observed_ms"] + row["sleep_ms"] + row["unknown_ms"],
                                  3_600_000)
@@ -167,11 +172,15 @@ class PreV1ConverterTests(unittest.TestCase):
             self.assertAlmostEqual(first["soc_integral_percent_ms"], 7_410_000.0)
             self.assertEqual((first["charging_ms"], first["discharging_ms"]),
                              (180_000, 180_000))
-            self.assertAlmostEqual(first["charged_energy_wh"], 0.2)
-            self.assertAlmostEqual(first["discharged_energy_wh"], 0.2)
-            full_hour = next(row for row in rows if row["hour_start_ms"] == 1704088800000)
-            self.assertEqual(full_hour["full_ms"], 60_000)
-            self.assertEqual(full_hour["full_on_ac_ms"], 60_000)
+            self.assertAlmostEqual(first["charged_energy_wh"], 2.22)
+            self.assertAlmostEqual(first["discharged_energy_wh"], 1.11)
+            self.assertIsNone(db.execute(
+                "SELECT 1 FROM hourly_history WHERE hour_start_ms=1704088800000"
+            ).fetchone())
+            current = db.execute(
+                "SELECT * FROM checkpoint_hourly WHERE hour_start_ms=1704088800000"
+            ).fetchone()
+            self.assertEqual((current["observed_ms"], current["full_ms"]), (180_000, 60_000))
             # Historical profile metadata is not promoted into invented durations.
             self.assertEqual(db.execute("SELECT count(*) FROM hourly_profile_durations").fetchone()[0], 0)
 
@@ -184,8 +193,8 @@ class PreV1ConverterTests(unittest.TestCase):
             ).fetchone()
             # Only adjacent continuous samples contribute. The battery switch/reset,
             # sleeps, reboot, wall-clock jump, and unknown gap contribute no delta.
-            self.assertAlmostEqual(totals[0], 0.4, places=7)
-            self.assertAlmostEqual(totals[1], 0.3, places=7)
+            self.assertAlmostEqual(totals[0], 2.22, places=7)
+            self.assertAlmostEqual(totals[1], 2.22, places=7)
             self.assertGreater(totals[2], 0)
             self.assertGreater(totals[3], 0)
 
@@ -228,7 +237,31 @@ class PreV1ConverterTests(unittest.TestCase):
             # The 3.2 -> 1.0 fall while charging is a counter reset, not discharge.
             self.assertAlmostEqual(out.execute(
                 "SELECT sum(discharged_energy_wh) FROM hourly_history"
-            ).fetchone()[0], 0.3)
+            ).fetchone()[0], 2.22)
+        finally:
+            out.close()
+
+    def test_switching_native_counter_family_is_rejected(self):
+        switched = self.source.parent / "switched.sqlite3"
+        db = sqlite3.connect(self.source)
+        try:
+            db.execute(
+                "UPDATE battery_samples SET energy_now_wh=NULL, charge_now_ah=1.9 "
+                "WHERE identity='battery-a' AND timestamp=1704067260"
+            )
+            db.commit()
+        finally:
+            db.close()
+        convert_v2_to_v1(self.source, switched)
+        out = sqlite3.connect(switched)
+        out.row_factory = sqlite3.Row
+        try:
+            first = out.execute(
+                "SELECT * FROM hourly_history ORDER BY hour_start_ms LIMIT 1"
+            ).fetchone()
+            self.assertEqual(first["charged_energy_wh"], 0)
+            self.assertTrue(first["quality_flags"] & 4)
+            self.assertTrue(first["energy_provenance_mask"] & 4)
         finally:
             out.close()
 
@@ -298,6 +331,72 @@ class PreV1ConverterTests(unittest.TestCase):
         self.assertFalse(self.destination.exists())
         self.assertFalse(Path(f"{self.destination}-wal").exists())
         self.assertFalse(Path(f"{self.destination}-shm").exists())
+
+    def test_mid_hour_conversion_seeds_immediately_readable_checkpoint(self):
+        convert_v2_to_v1(self.source, self.destination)
+        with V1Storage(self.destination).reader() as db:
+            self.assertIsNone(db.execute(
+                "SELECT 1 FROM hourly_history WHERE hour_start_ms=1704088800000"
+            ).fetchone())
+            header = db.execute("SELECT * FROM checkpoint_generations").fetchone()
+            self.assertEqual((header["generation"], header["last_poll_at_ms"],
+                              header["complete"]), (1, 1704088980000, 1))
+        view = V1History(self.destination).load(1704067200, now=1704088980)
+        self.assertEqual(view.generation, 1)
+        self.assertEqual((view.current.timestamp, view.current.percentage),
+                         (1704088980, 100.0))
+        self.assertTrue(any(item.timestamp >= 1704088800 for item in view.history))
+
+    def test_first_poll_and_utc_rollover_preserve_seeded_partial_hour(self):
+        convert_v2_to_v1(self.source, self.destination)
+
+        def poll(timestamp, monotonic):
+            raw = RawBatterySnapshot(
+                timestamp, monotonic, monotonic, "boot-b", "BAT1", "battery-b",
+                100.0, "full", True, voltage_now_v=12.0, energy_now_wh=3.2,
+                energy_full_wh=4.0, energy_full_design_wh=6.0, sources=("sysfs",),
+            )
+            return Measurement(
+                timestamp, 100.0, "full", True, power_w=0.0, energy_wh=3.2,
+                source="sysfs", device="BAT1", power_method="power-now",
+                power_confidence="high", monotonic_s=monotonic,
+                boottime_s=monotonic, boot_id="boot-b",
+                battery_identity="battery-b", raw_batteries=(raw,),
+            )
+
+        collector = V1Collector(V1Storage(self.destination))
+        collector.process_poll(poll(1704089040, 3490))
+        current = V1Storage(self.destination).recover().snapshot.hourly
+        self.assertEqual(current.observed_ms, 240_000)
+        collector.process_poll(poll(1704092400, 6850))
+        with V1Storage(self.destination).reader() as db:
+            finalized = db.execute(
+                "SELECT * FROM hourly_history WHERE hour_start_ms=1704088800000"
+            ).fetchone()
+        self.assertEqual(finalized["observed_ms"], 240_000)
+        self.assertEqual(finalized["unknown_ms"], 3_360_000)
+
+    def test_invalid_source_soc_is_rejected_without_destination(self):
+        db = sqlite3.connect(self.source)
+        try:
+            db.execute("UPDATE samples SET percentage=101 WHERE timestamp=(SELECT max(timestamp) FROM samples)")
+            db.commit()
+        finally:
+            db.close()
+        with self.assertRaisesRegex(PreV1ConversionError, "SoC"):
+            convert_v2_to_v1(self.source, self.destination)
+        self.assertFalse(self.destination.exists())
+
+    def test_converter_holds_one_source_read_snapshot(self):
+        original = pre_v1_converter._validate_source
+
+        def assert_transaction(db):
+            self.assertTrue(db.in_transaction)
+            return original(db)
+
+        with mock.patch.object(pre_v1_converter, "_validate_source",
+                               side_effect=assert_transaction):
+            convert_v2_to_v1(self.source, self.destination)
 
 
 if __name__ == "__main__":
