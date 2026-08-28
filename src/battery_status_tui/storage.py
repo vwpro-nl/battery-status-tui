@@ -213,6 +213,21 @@ class Storage:
             charge_full_ah=row["charge_full_ah"], charge_full_design_ah=row["charge_full_design_ah"],
             upower_energy_rate_w=row["upower_energy_rate_w"]) for row in rows)
 
+    def latest_raw_before(self, timestamp: int, identity: str) -> RawBatterySnapshot | None:
+        with self.connect() as db:
+            row = db.execute("""SELECT * FROM battery_samples
+                WHERE identity = ? AND timestamp < ? ORDER BY timestamp DESC LIMIT 1""",
+                (identity, timestamp)).fetchone()
+        if row is None:
+            return None
+        return RawBatterySnapshot(row["timestamp"], row["monotonic_s"], row["boottime_s"], row["boot_id"],
+            row["device"], row["identity"], row["percentage"], row["state"], None,
+            power_now_w=row["power_now_w"], current_now_a=row["current_now_a"], voltage_now_v=row["voltage_now_v"],
+            energy_now_wh=row["energy_now_wh"], energy_full_wh=row["energy_full_wh"],
+            energy_full_design_wh=row["energy_full_design_wh"], charge_now_ah=row["charge_now_ah"],
+            charge_full_ah=row["charge_full_ah"], charge_full_design_ah=row["charge_full_design_ah"],
+            upower_energy_rate_w=row["upower_energy_rate_w"])
+
     def record_sleep(self, interval: SleepInterval) -> None:
         with self.connect() as db:
             pre_percentage = interval.pre_percentage

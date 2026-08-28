@@ -2,6 +2,7 @@
 from __future__ import annotations
 import json
 import queue
+import re
 import subprocess
 import threading
 import time
@@ -9,6 +10,27 @@ from collections.abc import Callable
 from .models import RawBatterySnapshot, SleepInterval
 
 SLEEP_TOLERANCE_SECONDS = 5.0
+
+
+class PrepareForSleepParser:
+    """Parse only the boolean body belonging to a PrepareForSleep signal."""
+    def __init__(self) -> None:
+        self._member = False
+
+    def feed(self, line: str) -> bool | None:
+        stripped = line.strip()
+        if stripped.startswith("‣ Type=") or stripped.startswith("Type="):
+            self._member = False
+        if "Member=PrepareForSleep" in stripped:
+            self._member = True
+            return None
+        if not self._member:
+            return None
+        match = re.fullmatch(r"(?:b|BOOLEAN)\s+(true|false);?", stripped, re.IGNORECASE)
+        if match is None:
+            return None
+        self._member = False
+        return match.group(1).lower() == "true"
 
 def clock_sleep(previous: RawBatterySnapshot, current: RawBatterySnapshot) -> SleepInterval | None:
     if previous.boot_id != current.boot_id:
@@ -62,16 +84,13 @@ class LogindMonitor:
         try:
             self._process = self.popen(["busctl", "monitor", "org.freedesktop.login1"], text=True,
                                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-            member = False
+            parser = PrepareForSleepParser()
             assert self._process.stdout is not None
             for line in self._process.stdout:
-                if "Member=PrepareForSleep" in line:
-                    member = True
-                elif member and line.strip().startswith("b "):
-                    sleeping = line.strip().split()[-1].lower() == "true"
+                sleeping = parser.feed(line)
+                if sleeping is not None:
                     self.events.put((sleeping, int(time.time())))
                     self.wakeup.set()
-                    member = False
         except (OSError, subprocess.SubprocessError):
             return
 

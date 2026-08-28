@@ -163,6 +163,72 @@ def _sleep_boundary_percentages(
     return pre_percentage, post_percentage
 
 
+def _active_percentage_at(
+    timestamp: float,
+    history: Sequence[Measurement],
+    interval: SleepInterval,
+    bucket_start: int,
+    bucket_duration: int,
+) -> float | None:
+    """Interpolate active measurements within one mixed sleep bucket."""
+    samples = [sample for sample in history
+               if bucket_start <= sample.timestamp < bucket_start + bucket_duration
+               and not interval.started_at <= sample.timestamp < interval.ended_at]
+    before = [sample for sample in samples if sample.timestamp <= timestamp]
+    after = [sample for sample in samples if sample.timestamp >= timestamp]
+    left = max(before, key=lambda sample: sample.timestamp) if before else None
+    right = min(after, key=lambda sample: sample.timestamp) if after else None
+    if left is not None and right is not None and left.timestamp != right.timestamp:
+        fraction = (timestamp - left.timestamp) / (right.timestamp - left.timestamp)
+        return left.percentage + (right.percentage - left.percentage) * fraction
+    sample = left or right
+    return sample.percentage if sample is not None else None
+
+
+def _smooth_sleep_edges(
+    render_columns: Sequence[int],
+    raster: list[int],
+    baseline: Sequence[int],
+    top: Sequence[str],
+    bottom: Sequence[str],
+    percentages: Sequence[float | None],
+) -> list[int]:
+    """Move a Braille edge one dot toward directly adjacent solid history."""
+    if not render_columns:
+        return raster
+
+    def solid_level(column: int) -> int | None:
+        if not 0 <= column < GRAPH_WIDTH or percentages[column] is None:
+            return None
+        if top[column] not in BLOCKS or bottom[column] not in BLOCKS:
+            return None
+        return max(0, min(16, round((percentages[column] or 0) / 100 * 16)))
+
+    def adjust(index: int, neighbor: int, avoid_overshoot: bool = False) -> None:
+        level = solid_level(neighbor)
+        if level is None:
+            return
+        raster[index] = baseline[index]
+        braille_level = baseline[index] * 2
+        if level < braille_level:
+            candidate = max(0, baseline[index] - 1)
+            if not avoid_overshoot or candidate * 2 >= level:
+                raster[index] = candidate
+        elif level > braille_level:
+            candidate = min(8, baseline[index] + 1)
+            if not avoid_overshoot or candidate * 2 <= level:
+                raster[index] = candidate
+
+    run_start = 0
+    for index in range(1, len(render_columns) + 1):
+        if index < len(render_columns) and render_columns[index] == render_columns[index - 1] + 1:
+            continue
+        adjust(run_start * 2, render_columns[run_start] - 1, avoid_overshoot=True)
+        adjust((index - 1) * 2 + 1, render_columns[index - 1] + 1)
+        run_start = index
+    return raster
+
+
 def _battery_color(percentage: float) -> str:
     value = max(0.0, min(100.0, percentage))
     for (lower_value, lower_rgb), (upper_value, upper_rgb) in zip(
@@ -222,9 +288,18 @@ def _chart_rows_and_percentages(
         for column in render_columns:
             bucket_start = column_timestamp(column, now)
             left_timestamp, right_timestamp = _braille_subcolumn_times(bucket_start, COLUMN_SECONDS)
-            subcolumn_percentages.extend((sleep_percentage(left_timestamp), sleep_percentage(right_timestamp)))
+            for timestamp in (left_timestamp, right_timestamp):
+                percentage = sleep_percentage(timestamp)
+                if not interval.started_at <= timestamp < interval.ended_at:
+                    active = _active_percentage_at(timestamp, history, interval, bucket_start,
+                                                   COLUMN_SECONDS)
+                    percentage = active if active is not None else percentage
+                subcolumn_percentages.append(percentage)
         continuous_heights = [percentage / 100 * 8 for percentage in subcolumn_percentages]
-        raster = _sleep_residual_transfer(continuous_heights, _early_raster(continuous_heights))
+        baseline = _early_raster(continuous_heights)
+        raster = _sleep_residual_transfer(continuous_heights, baseline)
+        raster = _smooth_sleep_edges(render_columns, raster, baseline, top, bottom,
+                                     percentages_by_column)
         for index, column in enumerate(render_columns):
             bucket_start = column_timestamp(column, now)
             center_timestamp = bucket_start + COLUMN_SECONDS / 2
@@ -313,16 +388,17 @@ def _style_battery(row: str, percentages: Sequence[float | None]) -> str:
     )
 
 
-def title_line(current: Measurement) -> str:
+def title_line(current: Measurement, power_profile: str | None = None) -> str:
     arrow = "↑" if current.session_kind == "charging" else "↓" if current.session_kind == "discharging" else "·"
     arrow_column = GRAPH_OFFSET + NOW_INDEX
-    canvas = [" "] * (arrow_column + 16)
+    power = "-- W" if current.power_w is None else f"{'~' if current.power_approximate else ''}{current.power_w:.1f} W"
+    profile = f" ({power_profile})" if power_profile else ""
+    canvas = [" "] * (arrow_column + 2 + len(power) + len(profile))
     _put(canvas, 0, "BATTERY")
-    percentage = f"{current.percentage:.0f}%"
+    percentage = f"SoC {current.percentage:.0f}%"
     _put(canvas, arrow_column - len(percentage) - 1, percentage)
     _put(canvas, arrow_column, arrow)
-    power = "-- W" if current.power_w is None else f"{'~' if current.power_approximate else ''}{current.power_w:.1f} W"
-    _put(canvas, arrow_column + 2, power)
+    _put(canvas, arrow_column + 2, power + profile)
     plain = "".join(canvas).rstrip()
     return f"{BOLD}{CYAN}{plain[:7]}{RESET}{plain[7:arrow_column]}{YELLOW}{arrow}{RESET}{plain[arrow_column + 1:]}"
 
@@ -334,6 +410,8 @@ def render_dashboard(
     estimate: Estimate | None,
     now: int,
     sleep_intervals: Sequence[SleepInterval] = (),
+    health_percent: float | None = None,
+    power_profile: str | None = None,
 ) -> str:
     top, bottom, percentages = _chart_rows_and_percentages(current, history, estimate, now, sleep_intervals)
     elapsed = None if session is None else max(0, now - session.started_at)
@@ -350,11 +428,11 @@ def render_dashboard(
     ) else ""
     return "\n".join(
         (
-            title_line(current),
+            title_line(current, power_profile),
             f"{MUTED}{left_label}{RESET}{_style_battery(top, percentages)} {DIM}{right_label}{RESET}",
             f"{MUTED}{DIM}{left_meaning.ljust(GRAPH_OFFSET)}{RESET}{_style_battery(bottom, percentages)} "
             f"{MUTED}{DIM}{right_meaning}{RESET}".rstrip(),
             " " * GRAPH_OFFSET + axis,
-            " " * GRAPH_OFFSET + labels,
+            " " * GRAPH_OFFSET + labels + (f"   SoH {health_percent:.3f}%" if health_percent is not None else ""),
         )
     )

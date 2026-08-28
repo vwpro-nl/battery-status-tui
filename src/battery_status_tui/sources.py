@@ -110,7 +110,10 @@ class UPowerSource:
                 energy_full_design_wh=_number(item.get("energy-full-design")), upower_energy_rate_w=rate,
                 time_to_empty_s=_seconds(item.get("time to empty")), time_to_full_s=_seconds(item.get("time to full")),
                 cycle_count=int(v) if (v := _number(item.get("charge-cycles"))) is not None else None,
-                sources=("upower",)))
+                sources=("upower",), voltage_design_v=_number(item.get("voltage-min-design")),
+                upower_energy_full_wh=_number(item.get("energy-full")),
+                upower_energy_full_design_wh=_number(item.get("energy-full-design")),
+                upower_capacity_percent=_number(item.get("capacity"))))
         if not snapshots:
             raise SourceUnavailable("UPower found no system battery")
         return tuple(snapshots)
@@ -149,7 +152,8 @@ class SysfsSource:
                 charge_full_ah=_micro(battery / "charge_full"), charge_full_design_ah=_micro(battery / "charge_full_design"),
                 time_to_empty_s=int(v) if (v := _number(_read(battery / "time_to_empty_now"))) else None,
                 time_to_full_s=int(v) if (v := _number(_read(battery / "time_to_full_now"))) else None,
-                cycle_count=int(cycle) if cycle is not None else None, sources=("sysfs",)))
+                cycle_count=int(cycle) if cycle is not None else None, sources=("sysfs",),
+                voltage_design_v=_micro(battery / "voltage_min_design")))
         if not snapshots:
             raise SourceUnavailable("sysfs found no system battery")
         return tuple(snapshots)
@@ -214,7 +218,10 @@ class BatterySource:
                 rate = None
             merged.append(replace(item, ac_online=item.ac_online if item.ac_online is not None else upower_online,
                 upower_energy_rate_w=rate, time_to_empty_s=_seconds(up.get("time to empty")) or item.time_to_empty_s,
-                time_to_full_s=_seconds(up.get("time to full")) or item.time_to_full_s, sources=("sysfs", "upower")))
+                time_to_full_s=_seconds(up.get("time to full")) or item.time_to_full_s,
+                upower_energy_full_wh=_number(up.get("energy-full")),
+                upower_energy_full_design_wh=_number(up.get("energy-full-design")),
+                upower_capacity_percent=_number(up.get("capacity")), sources=("sysfs", "upower")))
         return tuple(merged)
 
     def read(self, now: int | None = None, history: tuple[RawBatterySnapshot, ...] = (),

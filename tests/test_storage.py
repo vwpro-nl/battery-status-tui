@@ -57,6 +57,19 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(storage.raw_samples_since(0)[0].charge_now_ah, 2)
             self.assertEqual(storage.sleep_intervals_since(0)[0].post_percentage, 49)
 
+    def test_latest_raw_before_uses_identity_without_a_time_window(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "history.sqlite3")
+            old = RawBatterySnapshot(100, 10, 10, "boot", "BAT0", "same", 67,
+                                     "discharging", False)
+            other = RawBatterySnapshot(10_000, 20, 20, "boot", "BAT1", "other", 50,
+                                       "discharging", False)
+            storage.record(Measurement(100, 67, "discharging", False, raw_batteries=(old,)))
+            storage.record(Measurement(10_000, 50, "discharging", False, raw_batteries=(other,)))
+            found = storage.latest_raw_before(20_000, "same")
+            self.assertEqual((found.timestamp, found.percentage, found.identity), (100, 67, "same"))
+            self.assertIsNone(storage.latest_raw_before(20_000, "missing"))
+
     def test_battery_replacement_starts_new_session(self):
         with tempfile.TemporaryDirectory() as directory:
             storage = Storage(Path(directory) / "history.sqlite3")
@@ -73,6 +86,18 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(len(intervals), 1)
             self.assertEqual((intervals[0].started_at, intervals[0].ended_at), (100, 200))
             self.assertEqual(intervals[0].source, "journal")
+
+    def test_multiple_detection_paths_do_not_duplicate_sleep(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "history.sqlite3")
+            storage.record_sleep(SleepInterval(100, 500, source="clocks", pre_percentage=67,
+                                               post_percentage=67))
+            storage.record_sleep(SleepInterval(98, 498, source="journal"))
+            storage.record_sleep(SleepInterval(99, 499, source="logind"))
+            intervals = storage.sleep_intervals_since(0)
+            self.assertEqual(len(intervals), 1)
+            self.assertEqual((intervals[0].started_at, intervals[0].ended_at,
+                              intervals[0].source), (99, 499, "logind"))
 
 
 if __name__ == "__main__":

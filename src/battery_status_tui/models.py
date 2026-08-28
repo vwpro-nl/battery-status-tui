@@ -34,6 +34,10 @@ class RawBatterySnapshot:
     time_to_full_s: int | None = None
     cycle_count: int | None = None
     sources: tuple[str, ...] = ()
+    voltage_design_v: float | None = None
+    upower_energy_full_wh: float | None = None
+    upower_energy_full_design_wh: float | None = None
+    upower_capacity_percent: float | None = None
 
 
 @dataclass(frozen=True, slots=True)

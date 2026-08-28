@@ -9,9 +9,11 @@ import battery_status_tui.graph as graph_module
 from battery_status_tui.graph import (
     COLUMN_SECONDS, FORECAST_SECONDS, GRAPH_OFFSET, GRAPH_WIDTH,
     HISTORY_SECONDS, MIN_EARLY_SLOPE, NOW_INDEX, TIME_COLUMNS,
-    _battery_color, _braille_fill, _braille_mask, _braille_subcolumn_times,
+    _active_percentage_at, _battery_color, _braille_fill, _braille_fill_levels, _braille_mask,
+    _braille_subcolumn_times,
     _chart_rows_and_percentages, _early_raster, _fill_chars, _sleep_columns,
-    _sleep_fraction, _sleep_residual_transfer, _style_battery, axis_rows, chart_rows, column_timestamp,
+    _sleep_fraction, _sleep_residual_transfer, _smooth_sleep_edges, _style_battery, axis_rows,
+    chart_rows, column_timestamp,
     project_column, render_dashboard, title_line,
 )
 from battery_status_tui.models import Estimate, Measurement, Session, SleepInterval
@@ -520,6 +522,96 @@ class GraphTests(unittest.TestCase):
         column = project_column(measured.timestamp, self.now)
         self.assertEqual((top[column], bottom[column]), _fill_chars(80))
 
+    def test_mixed_sleep_end_uses_active_data_for_right_subcolumn(self):
+        bucket_start = stamp(20)
+        sleep = SleepInterval(stamp(18), bucket_start + 6 * 60 + 13,
+                              pre_percentage=67, post_percentage=67)
+        history = [sample(bucket_start + 6 * 60 + 57, 67), sample(bucket_start + 15 * 60, 61),
+                   sample(bucket_start + 19 * 60, 59)]
+        left_time, right_time = _braille_subcolumn_times(bucket_start, COLUMN_SECONDS)
+        self.assertTrue(sleep.started_at <= left_time < sleep.ended_at)
+        self.assertFalse(sleep.started_at <= right_time < sleep.ended_at)
+        self.assertEqual(_active_percentage_at(right_time, history, sleep, bucket_start,
+                                               COLUMN_SECONDS), 61)
+
+        visible_history = [sample(bucket_start + 7 * 60, 67), sample(bucket_start + 15 * 60, 61),
+                           sample(bucket_start + 25 * 60, 52), sample(bucket_start + 26 * 60, 53)]
+        top, bottom = chart_rows(self.current, visible_history, None, self.now, [sleep])
+        column = project_column(bucket_start, self.now)
+        self.assertEqual((top[column], bottom[column]), _braille_fill_levels(5, 4))
+
+    def test_mixed_sleep_start_uses_active_data_for_left_subcolumn(self):
+        bucket_start = stamp(20)
+        sleep = SleepInterval(bucket_start + 13 * 60, stamp(21),
+                              pre_percentage=67, post_percentage=67)
+        history = [sample(bucket_start + minute * 60, percentage)
+                   for minute, percentage in ((1, 72), (5, 70), (10, 68))]
+        left_time, right_time = _braille_subcolumn_times(bucket_start, COLUMN_SECONDS)
+        self.assertFalse(sleep.started_at <= left_time < sleep.ended_at)
+        self.assertTrue(sleep.started_at <= right_time < sleep.ended_at)
+        self.assertEqual(_active_percentage_at(left_time, history, sleep, bucket_start,
+                                               COLUMN_SECONDS), 70)
+
+    def test_fully_sleeping_flat_bucket_keeps_sleep_geometry(self):
+        sleep = SleepInterval(stamp(20), stamp(20, 20), pre_percentage=67, post_percentage=67)
+        top, bottom = chart_rows(self.current, [], None, self.now, [sleep])
+        column = project_column(stamp(20), self.now)
+        self.assertEqual((top[column], bottom[column]), _braille_fill(67, 67))
+
+    def test_active_subcolumn_interpolation_uses_configured_bucket_duration(self):
+        duration = 15 * 60
+        bucket_start = stamp(20)
+        sleep = SleepInterval(bucket_start, bucket_start + 4 * 60, pre_percentage=67,
+                              post_percentage=67)
+        history = [sample(bucket_start + 6 * 60, 60), sample(bucket_start + 12 * 60, 54)]
+        timestamp = bucket_start + duration * 3 / 4
+        self.assertEqual(_active_percentage_at(timestamp, history, sleep, bucket_start, duration), 54.75)
+
+    def test_sleep_edge_smoothing_handles_falling_rising_and_equal_levels(self):
+        column = 10
+        for adjacent, expected in ((50, 4), (75, 6), (62.5, 5)):
+            with self.subTest(adjacent=adjacent):
+                top, bottom = [" "] * GRAPH_WIDTH, [" "] * GRAPH_WIDTH
+                percentages = [None] * GRAPH_WIDTH
+                top[column + 1], bottom[column + 1] = _fill_chars(adjacent)
+                percentages[column + 1] = adjacent
+                raster = _smooth_sleep_edges([column], [5, 5], [5, 5], top, bottom,
+                                             percentages)
+                self.assertEqual(raster[1], expected)
+
+    def test_sleep_edge_smoothing_is_symmetric_at_the_leading_edge(self):
+        column = 10
+        for adjacent, expected in ((50, 4), (75, 6), (62.5, 5)):
+            with self.subTest(adjacent=adjacent):
+                top, bottom = [" "] * GRAPH_WIDTH, [" "] * GRAPH_WIDTH
+                percentages = [None] * GRAPH_WIDTH
+                top[column - 1], bottom[column - 1] = _fill_chars(adjacent)
+                percentages[column - 1] = adjacent
+                raster = _smooth_sleep_edges([column], [5, 5], [5, 5], top, bottom,
+                                             percentages)
+                self.assertEqual(raster[0], expected)
+
+    def test_leading_sleep_edge_does_not_cross_a_half_level_solid_neighbor(self):
+        column = 10
+        for adjacent in (56.25, 68.75):
+            with self.subTest(adjacent=adjacent):
+                top, bottom = [" "] * GRAPH_WIDTH, [" "] * GRAPH_WIDTH
+                percentages = [None] * GRAPH_WIDTH
+                top[column - 1], bottom[column - 1] = _fill_chars(adjacent)
+                percentages[column - 1] = adjacent
+                raster = _smooth_sleep_edges([column], [5, 5], [5, 5], top, bottom,
+                                             percentages)
+                self.assertEqual(raster[0], 5)
+
+    def test_sleep_edge_smoothing_replaces_residual_at_a_solid_boundary(self):
+        column = 10
+        top, bottom = [" "] * GRAPH_WIDTH, [" "] * GRAPH_WIDTH
+        percentages = [None] * GRAPH_WIDTH
+        top[column + 1], bottom[column + 1] = _fill_chars(50)
+        percentages[column + 1] = 50
+        raster = _smooth_sleep_edges([column], [4, 6], [5, 5], top, bottom, percentages)
+        self.assertEqual(raster, [4, 4])
+
     def test_unmeasured_non_sleep_gap_stays_empty(self):
         history = [sample(stamp(16)), sample(stamp(18))]
         top, bottom = chart_rows(self.current, history, None, self.now)
@@ -569,6 +661,31 @@ class GraphTests(unittest.TestCase):
     def test_approximate_power_has_tilde(self):
         current = Measurement(self.now, 48, "discharging", False, power_w=7.2, power_approximate=True)
         self.assertIn("~7.2 W", plain(title_line(current)))
+
+    def test_header_shows_integer_soc_shifted_right_and_profile(self):
+        current = Measurement(self.now, 64.34, "discharging", False, power_w=10.9,
+                              power_approximate=True)
+        rendered = plain(title_line(current, "balanced"))
+        self.assertIn("SoC 64% ↓ ~10.9 W (balanced)", rendered)
+        self.assertEqual(rendered.index("SoC"), GRAPH_OFFSET + NOW_INDEX - len("SoC 64%") - 1)
+        self.assertEqual(rendered.index("↓"), GRAPH_OFFSET + NOW_INDEX)
+
+    def test_missing_profile_keeps_header_clean(self):
+        rendered = plain(title_line(self.current))
+        self.assertIn("SoC 48% ↓ 8.4 W", rendered)
+        self.assertNotIn("()", rendered)
+
+    def test_health_is_appended_to_existing_axis_label_row(self):
+        baseline = plain(render_dashboard(self.current, self.history, None, None, self.now)).splitlines()
+        rendered = plain(render_dashboard(self.current, self.history, None, None, self.now,
+                                          health_percent=62.309278351)).splitlines()
+        self.assertEqual(len(rendered), len(baseline))
+        self.assertEqual(rendered[:4], baseline[:4])
+        self.assertEqual(rendered[4], baseline[4] + "   SoH 62.309%")
+        self.assertEqual(rendered[1][GRAPH_OFFSET:GRAPH_OFFSET + GRAPH_WIDTH],
+                         baseline[1][GRAPH_OFFSET:GRAPH_OFFSET + GRAPH_WIDTH])
+        self.assertEqual(rendered[2][GRAPH_OFFSET:GRAPH_OFFSET + GRAPH_WIDTH],
+                         baseline[2][GRAPH_OFFSET:GRAPH_OFFSET + GRAPH_WIDTH])
 
 
 if __name__ == "__main__":

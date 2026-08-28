@@ -20,6 +20,7 @@ UPOWER_DUMP = """Device: /org/freedesktop/UPower/devices/battery_BAT0
     percentage:          48%
     time to empty:       2.3 hours
     charge-cycles:       72
+    capacity:            62.5%
 Device: /org/freedesktop/UPower/devices/battery_mouse
   native-path:          mouse
   power supply:         no
@@ -45,6 +46,11 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(measurement.power_w, 8.4)
         self.assertEqual(measurement.time_to_empty_s, 8280)
         self.assertFalse(measurement.ac_online)
+
+    def test_upower_raw_snapshot_preserves_health_fallbacks(self):
+        raw = UPowerSource(lambda *args, **kwargs: Result()).read_raw(now=100)[0]
+        self.assertEqual((raw.upower_energy_full_wh, raw.upower_energy_full_design_wh,
+                          raw.upower_capacity_percent), (35, 56, 62.5))
 
     def test_sysfs_computes_power_and_ignores_device_battery(self):
         with tempfile.TemporaryDirectory() as directory:

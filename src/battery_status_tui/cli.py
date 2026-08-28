@@ -16,6 +16,7 @@ from .models import SleepInterval
 from .sources import BatterySource, SourceUnavailable, aggregate
 from .storage import Storage, default_database_path
 from .suspend import LogindMonitor, clock_sleep, journal_intervals
+from .system_status import HealthResolver, PowerProfileResolver
 
 
 UNICODE_PROBE = """SOLID  : █ ▇ ▆ ▅ ▄ ▃ ▂ ▁
@@ -29,9 +30,9 @@ def next_refresh_delay(interval: float, wall_now: float) -> float:
     next_projection = (int(wall_now) // COLUMN_SECONDS + 1) * COLUMN_SECONDS
     return min(max(1.0, interval), max(0.05, next_projection - wall_now + 0.05))
 
-def reconcile_journal(storage: Storage, now: int) -> None:
+def reconcile_journal(storage: Storage, now: int, force: bool = False) -> None:
     checked = storage.metadata_int("journal-checked-at")
-    if checked is not None and now - checked < 3600:
+    if not force and checked is not None and now - checked < 3600:
         return
     since = max(now - 7 * 3600, (checked or 0) - 60)
     for interval in journal_intervals(since):
@@ -43,11 +44,14 @@ def collect(source: BatterySource, storage: Storage, now: int | None = None) -> 
     timestamp = int(time.time()) if now is None else now
     raw = source.read_raw(timestamp)
     history = storage.raw_samples_since(timestamp - 600)
-    previous_by_identity = {item.identity: item for item in history}
+    resumed = False
     for current in raw:
-        previous = previous_by_identity.get(current.identity)
+        previous = storage.latest_raw_before(timestamp, current.identity)
         if previous and (interval := clock_sleep(previous, current)) is not None:
             storage.record_sleep(interval)
+            resumed = True
+    if resumed:
+        reconcile_journal(storage, timestamp, force=True)
     sleeps = storage.sleep_intervals_since(timestamp - 6 * 3600)
     measurement = aggregate(raw, source.resolver, history,
                             tuple((item.started_at, item.ended_at) for item in sleeps))
@@ -73,7 +77,9 @@ def current_estimate(storage: Storage, current: Measurement, now: int) -> Estima
     return Estimate(seconds, estimate.source, estimate.slope_percent_per_hour)
 
 
-def render_once(source: BatterySource, storage: Storage, now: int | None = None) -> str:
+def render_once(source: BatterySource, storage: Storage, now: int | None = None,
+                health_resolver: HealthResolver | None = None,
+                profile_resolver: PowerProfileResolver | None = None) -> str:
     sample_timestamp = int(time.time()) if now is None else now
     current = collect(source, storage, sample_timestamp)
     render_timestamp = int(time.time()) if now is None else now
@@ -81,7 +87,10 @@ def render_once(source: BatterySource, storage: Storage, now: int | None = None)
     history = storage.samples_since(render_timestamp - 6 * 3600)
     estimate = current_estimate(storage, current, sample_timestamp)
     sleeps = storage.sleep_intervals_since(render_timestamp - 6 * 3600)
-    return render_dashboard(current, history, session, estimate, render_timestamp, sleeps)
+    health = health_resolver.resolve(current.raw_batteries) if health_resolver else None
+    profile = profile_resolver.resolve() if profile_resolver else None
+    return render_dashboard(current, history, session, estimate, render_timestamp, sleeps,
+                            health.percent if health else None, profile.profile if profile else None)
 
 
 def diagnostic_text(measurement: Measurement, storage: Storage) -> str:
@@ -153,6 +162,8 @@ def main(argv: list[str] | None = None) -> int:
 
     source = BatterySource()
     storage = Storage(args.database)
+    health_resolver = HealthResolver()
+    profile_resolver = PowerProfileResolver()
     reconcile_journal(storage, int(time.time()))
     try:
         if args.sample:
@@ -167,7 +178,8 @@ def main(argv: list[str] | None = None) -> int:
             print(diagnostic_text(measurement, storage))
             return 0
         if args.once or not sys.stdout.isatty():
-            print(render_once(source, storage))
+            print(render_once(source, storage, health_resolver=health_resolver,
+                              profile_resolver=profile_resolver))
             return 0
     except SourceUnavailable as error:
         print(f"battery-status-tui: {error}", file=sys.stderr)
@@ -188,11 +200,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         while running:
             try:
-                output = render_once(source, storage)
+                output = render_once(source, storage, health_resolver=health_resolver,
+                                     profile_resolver=profile_resolver)
             except SourceUnavailable as error:
                 output = f"battery-status-tui: {error}"
             sys.stdout.write(CSI + "2J" + CSI + "H" + output + "\n")
             sys.stdout.flush()
+            shown_profile = profile_resolver.resolve()
             deadline = time.monotonic() + next_refresh_delay(args.interval, time.time())
             while running and time.monotonic() < deadline:
                 monitor.wakeup.wait(min(0.2, deadline - time.monotonic()))
@@ -208,9 +222,14 @@ def main(argv: list[str] | None = None) -> int:
                         latest = storage.latest()
                         storage.record_sleep(SleepInterval(sleep_started, event_time, source="logind",
                             pre_percentage=latest.percentage if latest else None))
+                        reconcile_journal(storage, event_time, force=True)
                         sleep_started = None
                         resumed = True
                 if resumed:
+                    health_resolver.invalidate()
+                    profile_resolver.invalidate()
+                    break
+                if profile_resolver.resolve() != shown_profile:
                     break
     finally:
         monitor.close()
