@@ -184,6 +184,19 @@ def _power_line(measurement: Measurement) -> str:
 V4_RUNTIME_ERRORS = (SourceUnavailable, V1CollectorError, V1HistoryError, V1StorageError)
 
 
+def _recovered_last_poll_second(storage: V1Storage) -> int:
+    """Whole second of the last poll persisted in the recovered checkpoint.
+
+    The schema-v4 collector requires every poll's second to be strictly greater
+    than the recovered checkpoint's ``last_poll_at_ms``.  A freshly started
+    process must not poll in the same second as the previous run's final poll,
+    so the interactive poll-spacing guard is seeded from this value rather than
+    from zero.  Returns 0 when there is no valid checkpoint (cold start).
+    """
+    snapshot = storage.recover().snapshot
+    return 0 if snapshot is None else snapshot.last_poll_at_ms // 1_000
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     if args.unicode_probe:
@@ -214,15 +227,19 @@ def _run_v4(args: argparse.Namespace) -> int:
         print(f"battery-status-tui: {error}", file=sys.stderr)
         return 1
 
-    last_poll_ts = 0
+    # Seed the poll-spacing guard from the recovered checkpoint so a process
+    # that starts within the same second as the previous run's last poll (a
+    # rapid restart, or ``--once``/``--sample`` immediately before the TUI)
+    # waits for the next second instead of feeding the collector a
+    # non-increasing timestamp.
+    last_poll_ts = _recovered_last_poll_second(storage)
 
     def poll() -> Measurement:
         nonlocal last_poll_ts
         now = int(time.time())
         if now <= last_poll_ts:
-            # The schema-v4 collector requires strictly increasing poll seconds;
-            # the trial harness never re-polls fast enough to hit this, but the
-            # interactive projection-boundary wakeup can.
+            # Also covers the interactive projection-boundary wakeup landing in
+            # the same second as the previous poll.
             time.sleep(max(0.0, last_poll_ts + 1 - time.time()))
             now = int(time.time())
         resolved = profile_resolver.resolve()
