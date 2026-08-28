@@ -11,7 +11,7 @@ from battery_status_tui.graph import (
     HISTORY_SECONDS, MIN_EARLY_SLOPE, NOW_INDEX, TIME_COLUMNS,
     _battery_color, _braille_fill, _braille_mask, _braille_subcolumn_times,
     _chart_rows_and_percentages, _early_raster, _fill_chars, _sleep_columns,
-    _sleep_fraction, _style_battery, axis_rows, chart_rows, column_timestamp,
+    _sleep_fraction, _sleep_residual_transfer, _style_battery, axis_rows, chart_rows, column_timestamp,
     project_column, render_dashboard, title_line,
 )
 from battery_status_tui.models import Estimate, Measurement, Session, SleepInterval
@@ -237,6 +237,54 @@ class GraphTests(unittest.TestCase):
     def test_early_raster_does_not_invent_changes_in_live_flat_sleep_shapes(self):
         self.assertEqual(_early_raster([6.935, 6.889]), [7, 7])
         self.assertEqual(_early_raster([2.724, 2.738, 2.752, 2.766, 2.779, 2.793]), [3] * 6)
+
+    def test_sleep_residual_transfer_reveals_shallow_rising_and_falling_contours(self):
+        rising = [2.724, 2.738, 2.752, 2.766, 2.779, 2.793]
+        falling = list(reversed(rising))
+        self.assertEqual(_sleep_residual_transfer(rising, _early_raster(rising)), [2, 3, 3, 3, 3, 4])
+        self.assertEqual(_sleep_residual_transfer(falling, _early_raster(falling)), [4, 3, 3, 3, 3, 2])
+        self.assertEqual(_braille_mask(2, 3), "⣴")
+        self.assertEqual(_braille_mask(3, 4), "⣾")
+
+    def test_sleep_residual_transfer_ignores_flat_short_nonmonotone_and_clear_slopes(self):
+        cases = (
+            [3.1, 3.1, 3.1, 3.1],
+            [3.1, 3.2],
+            [3.1, 3.2, 3.15, 3.25],
+            [2.2, 2.6, 3.0, 3.4],
+        )
+        for heights in cases:
+            with self.subTest(heights=heights):
+                raster = _early_raster(heights)
+                self.assertEqual(_sleep_residual_transfer(heights, raster), raster)
+
+    def test_sleep_residual_transfer_preserves_dot_mass(self):
+        heights = [2.724, 2.738, 2.752, 2.766, 2.779, 2.793]
+        raster = _early_raster(heights)
+        transferred = _sleep_residual_transfer(heights, raster)
+        self.assertEqual(sum(transferred), sum(raster))
+
+    def test_sleep_residual_transfer_is_sleep_only_and_keeps_percentages(self):
+        forecast = Estimate(3600, "test")
+        with patch.object(graph_module, "_sleep_residual_transfer",
+                          wraps=graph_module._sleep_residual_transfer) as transfer:
+            chart_rows(self.current, [], forecast, self.now)
+        transfer.assert_not_called()
+
+        sleep = SleepInterval(stamp(18), stamp(19), pre_percentage=34.05, post_percentage=34.91)
+        with patch.object(graph_module, "_sleep_residual_transfer",
+                          side_effect=lambda heights, raster: list(raster)):
+            baseline_top, baseline_bottom, baseline_percentages = _chart_rows_and_percentages(
+                self.current, [], None, self.now, [sleep]
+            )
+        top, bottom, percentages = _chart_rows_and_percentages(
+            self.current, [], None, self.now, [sleep]
+        )
+        self.assertEqual(percentages, baseline_percentages)
+        self.assertEqual([_battery_color(value) if value is not None else None for value in percentages],
+                         [_battery_color(value) if value is not None else None
+                          for value in baseline_percentages])
+        self.assertNotEqual((top, bottom), (baseline_top, baseline_bottom))
 
     def test_forecast_stops_at_estimated_empty(self):
         top, bottom = chart_rows(self.current, self.history, Estimate(1800, "test"), self.now)

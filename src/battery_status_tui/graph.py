@@ -95,6 +95,24 @@ def _early_raster(continuous_heights: Sequence[float]) -> list[int]:
     return raster
 
 
+def _sleep_residual_transfer(continuous_heights: Sequence[float], raster: Sequence[int]) -> list[int]:
+    """Expose a shallow monotone sleep trend without changing total dot mass."""
+    transferred = list(raster)
+    if len(continuous_heights) < 4 or len(set(raster)) != 1:
+        return transferred
+    deltas = [right - left for left, right in zip(continuous_heights, continuous_heights[1:])]
+    rising = all(delta > 0 for delta in deltas)
+    falling = all(delta < 0 for delta in deltas)
+    if not (rising or falling) or abs(continuous_heights[-1] - continuous_heights[0]) >= 1:
+        return transferred
+    direction = 1 if rising else -1
+    if not (0 <= transferred[0] - direction <= 8 and 0 <= transferred[-1] + direction <= 8):
+        return transferred
+    transferred[0] -= direction
+    transferred[-1] += direction
+    return transferred
+
+
 def _braille_subcolumn_times(bucket_start: float, bucket_duration: int) -> tuple[float, float]:
     return bucket_start + bucket_duration / 4, bucket_start + bucket_duration * 3 / 4
 
@@ -205,7 +223,8 @@ def _chart_rows_and_percentages(
             bucket_start = column_timestamp(column, now)
             left_timestamp, right_timestamp = _braille_subcolumn_times(bucket_start, COLUMN_SECONDS)
             subcolumn_percentages.extend((sleep_percentage(left_timestamp), sleep_percentage(right_timestamp)))
-        raster = _early_raster([percentage / 100 * 8 for percentage in subcolumn_percentages])
+        continuous_heights = [percentage / 100 * 8 for percentage in subcolumn_percentages]
+        raster = _sleep_residual_transfer(continuous_heights, _early_raster(continuous_heights))
         for index, column in enumerate(render_columns):
             bucket_start = column_timestamp(column, now)
             center_timestamp = bucket_start + COLUMN_SECONDS / 2
