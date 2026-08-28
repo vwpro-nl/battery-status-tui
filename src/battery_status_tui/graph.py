@@ -433,6 +433,6 @@ def render_dashboard(
             f"{MUTED}{DIM}{left_meaning.ljust(GRAPH_OFFSET)}{RESET}{_style_battery(bottom, percentages)} "
             f"{MUTED}{DIM}{right_meaning}{RESET}".rstrip(),
             " " * GRAPH_OFFSET + axis,
-            " " * GRAPH_OFFSET + labels + (f"   SoH {health_percent:.3f}%" if health_percent is not None else ""),
+            " " * GRAPH_OFFSET + labels.ljust(GRAPH_WIDTH) + (f" SoH {health_percent:.3f}%" if health_percent is not None else ""),
         )
     )

@@ -675,17 +675,29 @@ class GraphTests(unittest.TestCase):
         self.assertIn("SoC 48% ↓ 8.4 W", rendered)
         self.assertNotIn("()", rendered)
 
-    def test_health_is_appended_to_existing_axis_label_row(self):
-        baseline = plain(render_dashboard(self.current, self.history, None, None, self.now)).splitlines()
-        rendered = plain(render_dashboard(self.current, self.history, None, None, self.now,
-                                          health_percent=62.309278351)).splitlines()
-        self.assertEqual(len(rendered), len(baseline))
-        self.assertEqual(rendered[:4], baseline[:4])
-        self.assertEqual(rendered[4], baseline[4] + "   SoH 62.309%")
-        self.assertEqual(rendered[1][GRAPH_OFFSET:GRAPH_OFFSET + GRAPH_WIDTH],
-                         baseline[1][GRAPH_OFFSET:GRAPH_OFFSET + GRAPH_WIDTH])
-        self.assertEqual(rendered[2][GRAPH_OFFSET:GRAPH_OFFSET + GRAPH_WIDTH],
-                         baseline[2][GRAPH_OFFSET:GRAPH_OFFSET + GRAPH_WIDTH])
+    def test_health_is_fixed_after_graph_at_all_bucket_phases(self):
+        for minute in (0, 20, 40):
+            now = stamp(12, minute)
+            baseline = plain(
+                render_dashboard(self.current, self.history, None, None, now)
+            ).splitlines()
+            rendered = plain(
+                render_dashboard(
+                    self.current,
+                    self.history,
+                    None,
+                    None,
+                    now,
+                    health_percent=62.309278351,
+                )
+            ).splitlines()
+
+            self.assertEqual(len(rendered), len(baseline))
+            self.assertEqual(rendered[:4], baseline[:4])
+            self.assertEqual(rendered[4].index("SoH"), GRAPH_OFFSET + GRAPH_WIDTH + 1)
+            self.assertEqual(rendered[4][GRAPH_OFFSET:GRAPH_OFFSET + GRAPH_WIDTH],
+                             baseline[4][GRAPH_OFFSET:GRAPH_OFFSET + GRAPH_WIDTH])
+            self.assertTrue(rendered[4].endswith("SoH 62.309%"))
 
 
 if __name__ == "__main__":
