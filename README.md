@@ -127,11 +127,11 @@ exclusive.
 ## Reading the graph
 
 ```
-BATTERY         SoC 72% ↑  12.4 W (balanced)
-0h48  ▁▂▃▄▅▆▇█…│⠈⠐⠠     3h10 ~19:40
-start ▁▂▃▄▅▆▇█…│⠁⠂⠄     full
-      ┬─────┬─────┬─────┬─────┬─────┬─────┬
-      13    14    15    16    17    18    19     SoH 94.3%
+BATTERY         SoC 72% ↓  12.4 W (balanced)
+0h48  ▇▇▆▆▆▆▆▅▅▅▅▅▅▄▄▄▄▄│⡀                  3h10 ~16:10
+start ██████████████████│⣿⣿⣶⣶⣤⣄⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀ empty
+      ┬──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬
+      07 08 09 10 11 12 13 14 15 16 17 18     SoH 94.3%
 ```
 
 - **12 hours, fixed layout.** 18 columns (6 h) of history, the `NOW` column
