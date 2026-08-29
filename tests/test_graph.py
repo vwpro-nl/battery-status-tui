@@ -294,11 +294,53 @@ class GraphTests(unittest.TestCase):
                           for value in baseline_percentages])
         self.assertNotEqual((top, bottom), (baseline_top, baseline_bottom))
 
-    def test_forecast_stops_at_estimated_empty(self):
+    def test_discharge_forecast_holds_empty_to_end_of_window(self):
+        top, bottom, percentages = _chart_rows_and_percentages(
+            self.current, self.history, Estimate(3 * 3600, "test"), self.now
+        )
+        endpoint = project_column(self.now + 3 * 3600, self.now)
+        self.assertTrue(all(value is not None for value in percentages[NOW_INDEX + 1:]))
+        self.assertTrue(all(value == 0 for value in percentages[endpoint:]))
+        self.assertEqual(top[endpoint:], " " * (GRAPH_WIDTH - endpoint))
+        self.assertEqual(bottom[endpoint:], "⣀" * (GRAPH_WIDTH - endpoint))
+        zero_style = f"{_battery_color(0)}⣀{graph_module.RESET}"
+        self.assertEqual(_battery_color(0), "\x1b[38;2;85;10;20m")
+        self.assertEqual(_style_battery(bottom, percentages).count(zero_style),
+                         GRAPH_WIDTH - endpoint)
+
+    def test_near_zero_discharge_forecast_keeps_bottom_dots_for_full_window(self):
+        current = Measurement(self.now, 1, "discharging", False)
+        top, bottom, percentages = _chart_rows_and_percentages(
+            current, [], Estimate(30 * 60, "test"), self.now
+        )
+        self.assertTrue(all(value is not None for value in percentages[NOW_INDEX + 1:]))
+        self.assertEqual(top[NOW_INDEX + 1:], " " * (GRAPH_WIDTH - NOW_INDEX - 1))
+        self.assertEqual(bottom[NOW_INDEX + 1:], "⣀" * (GRAPH_WIDTH - NOW_INDEX - 1))
+
+    def test_exact_zero_discharge_forecast_keeps_bottom_dots_for_full_window(self):
+        current = Measurement(self.now, 0, "discharging", False)
+        top, bottom, percentages = _chart_rows_and_percentages(
+            current, [], Estimate(1, "test"), self.now
+        )
+        self.assertEqual(percentages[NOW_INDEX + 1:], [0] * (GRAPH_WIDTH - NOW_INDEX - 1))
+        self.assertEqual(top[NOW_INDEX + 1:], " " * (GRAPH_WIDTH - NOW_INDEX - 1))
+        self.assertEqual(bottom[NOW_INDEX + 1:], "⣀" * (GRAPH_WIDTH - NOW_INDEX - 1))
+
+    def test_discharge_forecast_above_zero_still_uses_existing_projection(self):
+        current = Measurement(self.now, 50, "discharging", False)
+        top, bottom, percentages = _chart_rows_and_percentages(
+            current, [], Estimate(12 * 3600, "test"), self.now
+        )
+        self.assertTrue(all(value is not None and value > 0
+                            for value in percentages[NOW_INDEX + 1:]))
+        self.assertAlmostEqual(percentages[-1], 24.305555555555557)
+        self.assertTrue((top[NOW_INDEX + 1:] + bottom[NOW_INDEX + 1:]).strip())
+
+    def test_forecast_projection_endpoint_remains_six_hours(self):
         top, bottom = chart_rows(self.current, self.history, Estimate(1800, "test"), self.now)
         endpoint = project_column(self.now + 1800, self.now)
         self.assertTrue((top[NOW_INDEX + 1:endpoint + 1] + bottom[NOW_INDEX + 1:endpoint + 1]).strip())
-        self.assertFalse((top[endpoint + 1:] + bottom[endpoint + 1:]).strip())
+        self.assertTrue((top[endpoint + 1:] + bottom[endpoint + 1:]).strip())
 
     def test_charging_forecast_reaches_full_then_plateaus_to_six_hours(self):
         current = Measurement(self.now, 75, "charging", True)
@@ -332,7 +374,7 @@ class GraphTests(unittest.TestCase):
         )
         discharge_endpoint = project_column(self.now + 3600, self.now)
         self.assertEqual(discharge_percentages[discharge_endpoint], 0)
-        self.assertTrue(all(value is None for value in discharge_percentages[discharge_endpoint + 1:]))
+        self.assertTrue(all(value == 0 for value in discharge_percentages[discharge_endpoint + 1:]))
 
         _, _, recharging_percentages = _chart_rows_and_percentages(
             charging, [], Estimate(3600, "test"), self.now

@@ -324,9 +324,7 @@ def _chart_rows_and_percentages(
         current.state in {"full", "charged", "fully-charged"} or current.percentage >= 100
     )
     if full_on_ac or estimate is not None and kind in {"charging", "discharging"}:
-        endpoint = now + FORECAST_SECONDS if full_on_ac or kind == "charging" else min(
-            now + estimate.seconds, now + FORECAST_SECONDS
-        )
+        endpoint = now + FORECAST_SECONDS
 
         def forecast_percentage(timestamp: float) -> float:
             if full_on_ac:
