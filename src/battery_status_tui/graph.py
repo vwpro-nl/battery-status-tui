@@ -404,17 +404,17 @@ def title_line(current: Measurement, power_profile: str | None = None) -> str:
     arrow = "↑" if current.session_kind == "charging" else "↓" if current.session_kind == "discharging" else "·"
     arrow_column = GRAPH_OFFSET + NOW_INDEX
     if current.power_w is None:
-        power = " -- W"
+        power = "-- W"
     else:
         value = f"{'~' if current.power_approximate else ''}{current.power_w:.1f}"
         power = f"{value:>6} W"
     profile = f" ({power_profile})" if power_profile else ""
-    canvas = [" "] * (arrow_column + 1 + len(power) + len(profile))
+    canvas = [" "] * (arrow_column + 2 + len(power) + len(profile))
     _put(canvas, 0, "BATTERY")
     percentage = f"SoC {current.percentage:.0f}%"
     _put(canvas, arrow_column - len(percentage) - 1, percentage)
     _put(canvas, arrow_column, arrow)
-    _put(canvas, arrow_column + 1, power + profile)
+    _put(canvas, arrow_column + 2, power + profile)
     plain = "".join(canvas).rstrip()
     return f"{BOLD}{CYAN}{plain[:7]}{RESET}{plain[7:arrow_column]}{YELLOW}{arrow}{RESET}{plain[arrow_column + 1:]}"
 

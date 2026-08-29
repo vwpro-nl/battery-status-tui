@@ -762,12 +762,12 @@ class GraphTests(unittest.TestCase):
 
     def test_power_values_align_on_decimal_for_exact_and_approximate(self):
         cases = (
-            (8.3, False, "↓   8.3 W"),
-            (10.8, False, "↓  10.8 W"),
-            (8.3, True, "↓  ~8.3 W"),
-            (10.8, True, "↓ ~10.8 W"),
-            (123.4, False, "↓ 123.4 W"),
-            (123.4, True, "↓~123.4 W"),
+            (8.3, False, "↓    8.3 W"),
+            (10.8, False, "↓   10.8 W"),
+            (8.3, True, "↓   ~8.3 W"),
+            (10.8, True, "↓  ~10.8 W"),
+            (123.4, False, "↓  123.4 W"),
+            (123.4, True, "↓ ~123.4 W"),
         )
         decimal_columns = set()
         for watts, approximate, expected in cases:
@@ -788,13 +788,13 @@ class GraphTests(unittest.TestCase):
         current = Measurement(self.now, 64.34, "discharging", False, power_w=10.9,
                               power_approximate=True)
         rendered = plain(title_line(current, "balanced"))
-        self.assertIn("SoC 64% ↓ ~10.9 W (balanced)", rendered)
+        self.assertIn("SoC 64% ↓  ~10.9 W (balanced)", rendered)
         self.assertEqual(rendered.index("SoC"), GRAPH_OFFSET + NOW_INDEX - len("SoC 64%") - 1)
         self.assertEqual(rendered.index("↓"), GRAPH_OFFSET + NOW_INDEX)
 
     def test_missing_profile_keeps_header_clean(self):
         rendered = plain(title_line(self.current))
-        self.assertIn("SoC 48% ↓   8.4 W", rendered)
+        self.assertIn("SoC 48% ↓    8.4 W", rendered)
         self.assertNotIn("()", rendered)
 
     def test_health_is_fixed_after_graph_at_all_bucket_phases(self):
