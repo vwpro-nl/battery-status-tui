@@ -80,7 +80,7 @@ class V1HistoryTests(unittest.TestCase):
         self.assertEqual(len(lines), 5)
         self.assertIn("BATTERY", lines[0])
         self.assertIn("SoC 60% ↓ 10.0 W (balanced)", lines[0])
-        self.assertTrue(lines[4].endswith("SoH 62.500%"))
+        self.assertTrue(lines[4].endswith("SoH 62.5%"))
         self.assertEqual(lines[1].index("│"), GRAPH_OFFSET + NOW_INDEX)
 
     def test_open_hour_comes_from_checkpoint_and_recent_series(self) -> None:

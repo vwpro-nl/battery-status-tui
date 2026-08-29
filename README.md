@@ -120,7 +120,7 @@ BATTERY            SoC 72%   ↑ 12.4 W (balanced)
 0h48  ▁▂▃▄▅▆▇█…│⠈⠐⠠     3h10 ~19:40
 start ▁▂▃▄▅▆▇█…│⠁⠂⠄     full
       ┬─────┬─────┬─────┬─────┬─────┬─────┬
-      13    14    15    16    17    18    19   SoH 94.312%
+      13    14    15    16    17    18    19     SoH 94.3%
 ```
 
 - **12 hours, fixed layout.** 18 columns (6 h) of history, the `NOW` column
@@ -150,7 +150,7 @@ start ▁▂▃▄▅▆▇█…│⠁⠂⠄     full
   session began, labelled `start`. Right: the estimated remaining time and
   target clock time (`~HH:MM`), labelled `full` when charging or `empty` when
   discharging. `--` when there is no estimate.
-- **SoH.** `SoH X.XXX%` on the label line when a State-of-Health value can be
+- **SoH.** `SoH X.X%` on the label line when a State-of-Health value can be
   resolved from capacity vs. design capacity.
 - **Power profile.** Shown in parentheses after the power reading when
   power-profiles-daemon or the kernel platform profile is available.

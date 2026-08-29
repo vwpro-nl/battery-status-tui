@@ -114,7 +114,7 @@ BATTERY            SoC 72%   ↑ 12.4 W (balanced)
 0h48  ▁▂▃▄▅▆▇█…│⠈⠐⠠     3h10 ~19:40
 start ▁▂▃▄▅▆▇█…│⠁⠂⠄     full
       ┬─────┬─────┬─────┬─────┬─────┬─────┬
-      13    14    15    16    17    18    19   SoH 94.312%
+      13    14    15    16    17    18    19     SoH 94.3%
 ```
 
 - **Title:** `BATTERY`, then `SoC N%`, then the direction arrow (`↑` charging,
@@ -128,7 +128,7 @@ start ▁▂▃▄▅▆▇█…│⠁⠂⠄     full
   time (`~HH:MM`) — with the label `full` (charging) or `empty` (discharging)
   under it. `--` when there is no estimate.
 - **Axis:** hourly `┬` ticks with two-digit hour labels, in local time.
-- **SoH:** `SoH X.XXX%` at the end of the label line, shown only when a
+- **SoH:** `SoH X.X%` at the end of the label line, shown only when a
   State-of-Health value could be resolved (see
   [history-model.md](history-model.md#health--soh-event-storage)).
 

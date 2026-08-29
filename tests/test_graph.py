@@ -796,10 +796,10 @@ class GraphTests(unittest.TestCase):
 
             self.assertEqual(len(rendered), len(baseline))
             self.assertEqual(rendered[:4], baseline[:4])
-            self.assertEqual(rendered[4].index("SoH"), GRAPH_OFFSET + GRAPH_WIDTH + 1)
+            self.assertEqual(rendered[4].index("SoH"), GRAPH_OFFSET + GRAPH_WIDTH + 3)
             self.assertEqual(rendered[4][GRAPH_OFFSET:GRAPH_OFFSET + GRAPH_WIDTH],
                              baseline[4][GRAPH_OFFSET:GRAPH_OFFSET + GRAPH_WIDTH])
-            self.assertTrue(rendered[4].endswith("SoH 62.309%"))
+            self.assertTrue(rendered[4].endswith("SoH 62.3%"))
 
 
 if __name__ == "__main__":
