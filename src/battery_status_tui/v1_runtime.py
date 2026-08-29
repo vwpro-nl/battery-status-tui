@@ -1,4 +1,4 @@
-"""Explicit schema-v4 trial collection and rendering runtime."""
+"""Schema-v4 collection and rendering runtime used by the normal CLI."""
 
 from __future__ import annotations
 

@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Explicit, pre-cutover schema-v4 trial collector and renderer."""
+"""Standalone schema-v4 collector/renderer for a separate throwaway database.
+
+A developer helper for exercising the schema-v4 runtime against an explicit
+``--database`` path, isolated from the normal history file.  The normal
+``battery-status-tui`` entry point runs the same runtime natively.
+"""
 
 from __future__ import annotations
 
@@ -16,9 +21,10 @@ from battery_status_tui.v1_storage import V1Storage, V1StorageError
 
 
 def parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser(description="Run an explicit schema-v4 battery trial")
+    result = argparse.ArgumentParser(
+        description="Run the schema-v4 runtime against a separate throwaway database")
     result.add_argument("--database", type=Path, required=True,
-                        help="separate schema-v4 trial database (required)")
+                        help="separate schema-v4 database to use (required)")
     result.add_argument("--render-only", action="store_true",
                         help="render without collecting or writing")
     return result

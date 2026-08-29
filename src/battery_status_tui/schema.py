@@ -1,8 +1,14 @@
 """Versioned SQLite schema definitions.
 
-Schema versions are independent from the application version.  Version 2 is
-the current production schema; versions 3 and 4 are reserved for the staged
-v1.0 storage migration.
+Schema versions are independent from the application version.  Schema v4
+(``V1_SCHEMA_VERSION``) is the definitive v1.0 storage format: fresh databases
+are created at it directly by ``V1Storage`` and pre-1.0 schema-v2 databases are
+converted to it by the offline tool in ``pre_v1_converter``.
+
+The legacy writer migration runner in ``migrations`` only ever produces schema
+v2 (``CURRENT_SCHEMA_VERSION``); it is the last stop for schema-v0/v1 databases
+and is not a path into schema v4.  ``PLANNED_SCHEMA_VERSIONS`` is retained for
+the legacy runner's bounds checks; version 3 was never used.
 """
 
 from __future__ import annotations
@@ -116,8 +122,10 @@ V2_REQUIRED_TABLES = frozenset({
 })
 
 
-# The locked v1 schema is defined here for isolated creation and contract
-# tests.  It is deliberately not wired into the v2 migration runner yet.
+# The definitive v1.0 schema (SQLite ``user_version`` 4).  It is created
+# directly by ``V1Storage`` for fresh databases and by the offline pre-1.0
+# converter; it is intentionally never reached through the legacy v2 migration
+# runner.
 V1_CREATE_STATEMENTS = (
     """CREATE TABLE batteries (
         id INTEGER PRIMARY KEY,

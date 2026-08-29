@@ -1,4 +1,4 @@
-# Local storage
+# Local storage and privacy
 
 History is stored by default at:
 
@@ -6,41 +6,38 @@ History is stored by default at:
 ${XDG_STATE_HOME:-~/.local/state}/battery-status-tui/history.sqlite3
 ```
 
-Override it for testing with `--database PATH`.
+Override it with `--database PATH`.
 
-The SQLite database contains:
+A fresh database is created at **schema v4**, the definitive v1.0 storage
+format. Its structure, durability guarantees, and recovery behavior are
+documented in [architecture.md](architecture.md). The history model it records —
+observed vs. sleep vs. unknown time, sessions, suspend/hibernate, battery
+identity, and health events — is documented in
+[history-model.md](history-model.md).
 
-- timestamped percentage, state, AC state, watts, voltage and current samples;
-- the source and native battery name;
-- raw energy, charge, voltage and direct-power candidates per physical battery;
-- power method, confidence, observation window and approximate/direct status;
-- realtime, monotonic and boottime clocks, boot ID and battery identity;
-- reconstructed suspend/hibernate intervals and their adjacent percentages;
-- UPower's contemporaneous remaining-time estimate when available;
-- charging and discharging session boundaries;
-- a small per-session smoothed ETA value.
+If you ran a pre-1.0 development build, its database is schema v2. It is not
+migrated automatically; see [migration.md](migration.md) for the offline
+conversion path.
 
-A transaction closes the old session, opens the new one and inserts the sample
-atomically. Switching from battery to AC or vice versa therefore cannot attach
-one sample to both sessions. `Full`, `Empty` and battery-idle states close an
-active session.
+## Privacy
 
-Raw measurements are retained for 30 days. Session summaries remain available
-after raw pruning so later trend and lifetime reports can be added without a
-schema redesign. At one sample per minute, collection has negligible CPU and
-storage overhead. The supplied systemd timer starts a short-lived process each
-minute rather than keeping a daemon resident.
+The database contains only battery and power-supply telemetry: timestamps,
+percentages, states, AC state, watts/volts/amps, capacity and cycle counts,
+reconstructed suspend/hibernate intervals, power-profile names, and
+charge/discharge session boundaries. It contains no network, application, or
+user-content data. Nothing is uploaded.
 
-The database contains no network, application or user-content data. Nothing is
-uploaded.
+## Overhead
 
-Suspend is detected live through logind's `PrepareForSleep` signal and
-independently reconstructed from the difference between boottime and monotonic
-time. Kernel suspend entry/exit messages from the journal provide a durable
-fallback. Overlapping detections are merged. A battery replacement closes the
-active session and starts a new one without joining incompatible counters.
+At one sample per minute, collection has negligible CPU and storage cost. Only
+*changes* are stored as events; per-hour aggregates are one row each; the
+rotating checkpoint keeps at most three generations plus up to eight hours of
+compact sub-hour points. The supplied systemd timer starts a short-lived
+process each minute rather than keeping a daemon resident.
 
-The supplied timer intentionally remains unchanged in this release. Its
-monotonic interval pauses during suspend, but the next sample reconstructs the
-sleep interval from stored clocks. Whether a calendar timer offers a useful
-additional immediate post-resume sample is evaluated separately.
+## One writer
+
+Run a single writer against a database — either an interactive
+`battery-status-tui` session or the `--sample` timer, not both, and not two
+resident sessions. Any number of read-only consumers may run concurrently. See
+[architecture.md](architecture.md#one-writer-expectation).

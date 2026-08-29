@@ -97,7 +97,12 @@ def _migrate_legacy_to_v2(db: sqlite3.Connection) -> None:
 
 
 def run_writer_migrations(db: sqlite3.Connection) -> None:
-    """Initialise or migrate through schema v2; future v3/v4 steps plug in here."""
+    """Initialise or migrate a legacy database up to schema v2.
+
+    Schema v2 is the last version this runner produces.  The definitive v1.0
+    storage format is schema v4, created directly by ``V1Storage`` (or the
+    offline pre-1.0 converter), not by stepwise migration through here.
+    """
     configure_writer(db)
     version = schema_version(db)
     if version > CURRENT_SCHEMA_VERSION:
@@ -110,8 +115,8 @@ def run_writer_migrations(db: sqlite3.Connection) -> None:
         return
 
     # Versions 0 and 1 both represent the pre-v2 layouts supported by the
-    # previous ad-hoc Storage migration.  Planned migrations extend this
-    # dispatch as v2 -> v3 and v3 -> v4 without coupling it to app versions.
+    # previous ad-hoc Storage migration.  This dispatch stops at v2; schema v4
+    # is produced out of band, not by a v2 -> v3 -> v4 chain here.
     db.execute("BEGIN IMMEDIATE")
     try:
         _migrate_legacy_to_v2(db)
