@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import signal
 import sqlite3
 import tempfile
@@ -20,6 +21,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from battery_status_tui import cli
+from battery_status_tui.graph import GRAPH_OFFSET, NOW_INDEX
 from battery_status_tui.models import Measurement, RawBatterySnapshot
 from battery_status_tui.power import PowerResolver
 from battery_status_tui.recent_series import decode_recent_series
@@ -30,6 +32,11 @@ from battery_status_tui.v1_storage import MAX_GENERATIONS, V1Storage
 
 BOOT = "boot-cli-v4"
 POLL_INTERVAL_S = 400
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def plain(value: str) -> str:
+    return ANSI.sub("", value)
 
 
 class FakeClock:
@@ -87,6 +94,20 @@ class FakeSource:
             device="BAT0", power_method="current-voltage", power_confidence="high",
             monotonic_s=float(moment), boottime_s=float(moment), boot_id=BOOT,
             battery_identity=raw.identity, raw_batteries=(raw,),
+        )
+
+
+class ChargeReportingFakeSource(FakeSource):
+    def __init__(self) -> None:
+        super().__init__(soc=50.0, state="discharging", ac=False)
+
+    def _raw(self, now: int) -> RawBatterySnapshot:
+        return RawBatterySnapshot(
+            now, float(now), float(now), BOOT, "/sys/class/power_supply/BAT0",
+            self.identity, self.soc, self.state, self.ac,
+            voltage_now_v=10.0, energy_now_wh=None, charge_now_ah=2.0,
+            charge_full_ah=4.0, charge_full_design_ah=5.0,
+            upower_energy_rate_w=10.0, cycle_count=75, sources=("sysfs", "upower"),
         )
 
 
@@ -216,11 +237,15 @@ class V4CliRuntimeTests(unittest.TestCase):
     # Required CLI modes against schema v4
     # ------------------------------------------------------------------
     def test_once_renders_dashboard_from_v4(self) -> None:
-        self.poll_once(FakeSource())
+        self.poll_once(ChargeReportingFakeSource())
         code, out = self.view_once()
         self.assertEqual(code, 0)
         self.assertNotIn("battery-status-tui:", out)
-        self.assertGreaterEqual(len(out.splitlines()), 3)
+        rendered = plain(out)
+        graph_rows = rendered.splitlines()[1:3]
+        right = "".join(row[GRAPH_OFFSET + NOW_INDEX + 1:] for row in graph_rows)
+        self.assertTrue(any(0x2800 <= ord(char) <= 0x28FF for char in right))
+        self.assertIn("2h00 ~", rendered)
 
     def test_diagnose_reads_v4_and_writes_no_checkpoint(self) -> None:
         self.assertFalse(self.path.exists())

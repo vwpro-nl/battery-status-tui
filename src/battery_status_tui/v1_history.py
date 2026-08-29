@@ -66,6 +66,15 @@ def _ac_state(flags: int) -> bool | None:
     return False if value == 1 else True if value == 2 else None
 
 
+def _charge_energy(energy: float | None, charge: float | None,
+                   voltage: float | None) -> float | None:
+    if energy is not None:
+        return energy
+    if charge is not None and voltage is not None:
+        return charge * voltage
+    return None
+
+
 def _point_measurement(point: RecentPoint, snapshot: GenerationSnapshot,
                        batteries: tuple[RawBatterySnapshot, ...]) -> Measurement:
     method = METHODS.get((point.flags & POWER_METHOD_MASK) >> POWER_METHOD_SHIFT,
@@ -73,13 +82,21 @@ def _point_measurement(point: RecentPoint, snapshot: GenerationSnapshot,
     confidence = CONFIDENCE.get(
         (point.flags & POWER_CONFIDENCE_MASK) >> POWER_CONFIDENCE_SHIFT, "none"
     )
-    energy_values = [item.energy_now_wh for item in batteries]
+    energy_values = [_charge_energy(
+        item.energy_now_wh, item.charge_now_ah, item.voltage_now_v,
+    ) for item in batteries]
     energy = (sum(value for value in energy_values if value is not None)
               if energy_values and all(value is not None for value in energy_values) else None)
-    full_values = [item.energy_full_wh if item.energy_full_wh is not None
-                   else item.upower_energy_full_wh for item in batteries]
-    design_values = [item.energy_full_design_wh if item.energy_full_design_wh is not None
-                     else item.upower_energy_full_design_wh for item in batteries]
+    full_values = [_charge_energy(
+        item.energy_full_wh if item.energy_full_wh is not None
+        else item.upower_energy_full_wh,
+        item.charge_full_ah, item.voltage_now_v,
+    ) for item in batteries]
+    design_values = [_charge_energy(
+        item.energy_full_design_wh if item.energy_full_design_wh is not None
+        else item.upower_energy_full_design_wh,
+        item.charge_full_design_ah, item.voltage_now_v,
+    ) for item in batteries]
     energy_full = (sum(value for value in full_values if value is not None)
                    if full_values and all(value is not None for value in full_values) else None)
     energy_design = (sum(value for value in design_values if value is not None)

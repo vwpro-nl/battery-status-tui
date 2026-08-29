@@ -4,7 +4,6 @@ import re
 import sqlite3
 import tempfile
 import unittest
-from dataclasses import replace
 from pathlib import Path
 
 from battery_status_tui.graph import GRAPH_OFFSET, GRAPH_WIDTH, NOW_INDEX, chart_rows
@@ -91,6 +90,7 @@ class V1HistoryTests(unittest.TestCase):
         view = V1History(self.path).load(now - 3600, now=now + 60)
         self.assertEqual([item.percentage for item in view.history], [60.0])
         self.assertEqual(view.current.percentage, 59.5)
+        self.assertEqual(view.current.energy_wh, 39.9)
         self.assertEqual(view.hourly_accumulator.observed_ms, 60_000)
 
     def test_stale_checkpoint_still_supplies_current_without_fake_recent_history(self) -> None:
@@ -200,13 +200,36 @@ class V1HistoryTests(unittest.TestCase):
                 self.assertTrue(any(0x2800 <= ord(char) <= 0x28FF for char in right))
                 self.assertGreater(len(view.trend_history), 3)
 
-    def test_live_current_preserves_source_eta_before_a_trend_exists(self) -> None:
+    def test_charge_checkpoint_reconstructs_energy_and_forecast_before_trend(self) -> None:
         now = 10 * 3600
-        charging = sample(now, soc=50, state="charging", ac=True)
-        charging = replace(charging, time_to_full_s=1800)
-        self.collector.process_poll(charging, profile="balanced")
-        output = plain(render_v1(self.storage, now=now, current=charging))
-        self.assertIn("0h30 ~", output)
+        voltage = 10.0
+        charge = 2.0
+        raw = RawBatterySnapshot(
+            now, float(now), float(now), "boot-a", "/sys/BAT0", "BAT0",
+            50, "discharging", False, voltage_now_v=voltage,
+            energy_now_wh=None, charge_now_ah=charge, charge_full_ah=4.0,
+            charge_full_design_ah=5.0, sources=("sysfs",),
+        )
+        current = Measurement(
+            now, 50, "discharging", False, power_w=10.0,
+            energy_wh=charge * voltage, energy_full_wh=40.0,
+            energy_full_design_wh=50.0, source="sysfs", power_method="power-now",
+            power_confidence="high", monotonic_s=float(now), boottime_s=float(now),
+            boot_id="boot-a", battery_identity="BAT0", raw_batteries=(raw,),
+        )
+        self.collector.process_poll(current, profile="balanced")
+
+        view = V1History(self.path).load(now - 3600, now=now)
+        self.assertEqual(view.trend_history, (view.current,))
+        self.assertAlmostEqual(view.current.energy_wh, 20.0)
+        self.assertAlmostEqual(view.current.energy_full_wh, 40.0)
+        self.assertAlmostEqual(view.current.energy_full_design_wh, 50.0)
+
+        output = plain(render_v1(self.storage, now=now))
+        graph_rows = output.splitlines()[1:3]
+        right = "".join(row[GRAPH_OFFSET + NOW_INDEX + 1:] for row in graph_rows)
+        self.assertTrue(any(0x2800 <= ord(char) <= 0x28FF for char in right))
+        self.assertIn("2h00 ~", output)
 
     def test_read_only_view_does_not_change_database_rows(self) -> None:
         now = 10 * 3600
