@@ -41,7 +41,7 @@ column.
 | Cell | Drawn as | Meaning |
 |---|---|---|
 | Observed solid history | block char `▁`–`█`, gradient-colored | the collector was awake and measured this; median SoC of the 20-minute bucket |
-| Observed history at exactly 0% | `▁` in `#550A14` | battery was genuinely empty and measured — **not** a gap |
+| Observed history near empty | at least `▁`, using the actual SoC color | low battery was measured — **not** a gap |
 | Sleep / hibernate | Braille, gradient-colored | a proven suspend/hibernate span; SoC interpolated between the pre- and post-sleep readings |
 | Forecast | Braille, gradient-colored | projected SoC to the right of NOW |
 | Unknown | blank (space) | the collector was not running, or continuity broke with no sleep evidence |
@@ -49,17 +49,15 @@ column.
 **The general rule: known data is always visible; a blank cell means unknown /
 no reliable data.** Concretely:
 
-- Observed solid history at exact 0% shows the smallest block `▁` in `#550A14`
-  (`_fill_chars` special-cases `percentage == 0`).
+- Valid observed solid history always shows at least the smallest block `▁`;
+  exact 0% uses `#550A14`, while other low values use their actual SoC color.
 - Valid sleep/hibernate Braille at 0% keeps one bottom Braille dot per
   sub-column.
 - Valid forecast Braille at 0% keeps one bottom Braille dot per sub-column.
 - An unknown span stays blank.
 
-(Positive solid-history readings still quantize to 16 half-block levels, so a
-value below roughly 3% rounds to an empty solid cell; the Braille rows, used for
-sleep and forecast, keep a minimum dot for any valid SoC and do not have this
-limitation.)
+Above the minimum block, solid history retains its normal 16-level
+quantization. Braille rows retain their separate 8-level geometry.
 
 ## Color gradient
 

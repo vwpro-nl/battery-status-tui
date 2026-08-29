@@ -130,10 +130,11 @@ start ▁▂▃▄▅▆▇█…│⠁⠂⠄     full
 - **Forecast** — Braille cells right of `NOW`.
 - **Unknown gaps** — blank. The collector was not running, or continuity broke
   with no sleep evidence.
-- **Known 0% vs unknown.** A measured empty battery shows the smallest block
-  `▁` in deep red `#550A14`; valid sleep and forecast trajectories at 0% keep a
-  bottom Braille dot. Only genuinely-unknown cells are blank. The rule
-  throughout: *known data stays visible; empty means no reliable data.*
+- **Known low SoC vs unknown.** Every measured history bucket shows at least
+  the smallest block `▁`, using its actual SoC color; exact 0% is deep red
+  `#550A14`. Valid sleep and forecast trajectories at 0% keep a bottom Braille
+  dot. Only genuinely-unknown cells are blank. The rule throughout: *known data
+  stays visible; empty means no reliable data.*
 - **Held-at-empty forecast.** A discharge forecast that reaches 0% stays at 0%
   in `#550A14` for the rest of the 6-hour window rather than being truncated.
 - **Charging plateau.** A charge forecast that reaches 100% plateaus at a full

@@ -431,10 +431,21 @@ class GraphTests(unittest.TestCase):
         self.assertIn(f"{_battery_color(0)}▁{graph_module.RESET}",
                       _style_battery(bottom, percentages))
 
-    def test_positive_solid_history_quantization_is_unchanged(self):
-        self.assertEqual(_fill_chars(1), (" ", " "))
-        self.assertEqual(_fill_chars(5), (" ", "▁"))
-        self.assertEqual(_fill_chars(50), (" ", "█"))
+    def test_known_low_solid_history_is_visible_with_actual_soc_color(self):
+        for percentage, expected in ((0, "▁"), (1, "▁"), (2, "▁"), (3, "▁"),
+                                     (5, "▁"), (50, "█")):
+            with self.subTest(percentage=percentage):
+                self.assertEqual(_fill_chars(percentage), (" ", expected))
+                column = project_column(stamp(20, 40), self.now)
+                top, bottom, percentages = _chart_rows_and_percentages(
+                    self.current, [sample(stamp(20, 40), percentage)], None, self.now
+                )
+                self.assertEqual((top[column], bottom[column]), (" ", expected))
+                self.assertEqual(percentages[column], percentage)
+                self.assertIn(
+                    f"{_battery_color(percentage)}{expected}{graph_module.RESET}",
+                    _style_battery(bottom, percentages),
+                )
 
     def test_charging_forecast_uses_changing_gradient_colors(self):
         current = Measurement(self.now, 60, "charging", True)

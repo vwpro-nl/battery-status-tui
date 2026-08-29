@@ -54,9 +54,7 @@ def _put(canvas: list[str], position: int, text: str) -> None:
 
 
 def _fill_chars(percentage: float) -> tuple[str, str]:
-    if percentage == 0:
-        return " ", BLOCKS[1]
-    level = max(0, min(16, round(percentage / 100 * 16)))
+    level = max(1, min(16, round(percentage / 100 * 16)))
     bottom = BLOCKS[min(8, level)]
     top = BLOCKS[max(0, level - 8)]
     return top, bottom
