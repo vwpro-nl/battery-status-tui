@@ -760,9 +760,29 @@ class GraphTests(unittest.TestCase):
         self.assertNotIn("empty", charging_meanings)
         self.assertEqual(charging_meanings[GRAPH_OFFSET + GRAPH_WIDTH + 1:], "full")
 
-    def test_approximate_power_has_tilde(self):
-        current = Measurement(self.now, 48, "discharging", False, power_w=7.2, power_approximate=True)
-        self.assertIn("~7.2 W", plain(title_line(current)))
+    def test_power_values_align_on_decimal_for_exact_and_approximate(self):
+        cases = (
+            (8.3, False, "↓   8.3 W"),
+            (10.8, False, "↓  10.8 W"),
+            (8.3, True, "↓  ~8.3 W"),
+            (10.8, True, "↓ ~10.8 W"),
+            (123.4, False, "↓ 123.4 W"),
+            (123.4, True, "↓~123.4 W"),
+        )
+        decimal_columns = set()
+        for watts, approximate, expected in cases:
+            with self.subTest(watts=watts, approximate=approximate):
+                current = Measurement(
+                    self.now, 48, "discharging", False, power_w=watts,
+                    power_approximate=approximate,
+                )
+                rendered = plain(title_line(current))
+                self.assertIn(expected, rendered)
+                decimal_columns.add(rendered.index("."))
+                self.assertEqual(rendered.index("↓"), GRAPH_OFFSET + NOW_INDEX)
+        self.assertEqual(len(decimal_columns), 1)
+        missing = Measurement(self.now, 48, "discharging", False)
+        self.assertIn("↓ -- W", plain(title_line(missing)))
 
     def test_header_shows_integer_soc_shifted_right_and_profile(self):
         current = Measurement(self.now, 64.34, "discharging", False, power_w=10.9,
@@ -774,7 +794,7 @@ class GraphTests(unittest.TestCase):
 
     def test_missing_profile_keeps_header_clean(self):
         rendered = plain(title_line(self.current))
-        self.assertIn("SoC 48% ↓ 8.4 W", rendered)
+        self.assertIn("SoC 48% ↓   8.4 W", rendered)
         self.assertNotIn("()", rendered)
 
     def test_health_is_fixed_after_graph_at_all_bucket_phases(self):
