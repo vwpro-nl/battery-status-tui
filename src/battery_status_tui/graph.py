@@ -73,9 +73,7 @@ def _braille_fill(left_percentage: float, right_percentage: float | None = None)
 
 
 def _braille_level(continuous_height: float) -> int:
-    """Quantize a valid positive SoC without making its subcolumn disappear."""
-    if continuous_height <= 0:
-        return 0
+    """Quantize a valid SoC without making its subcolumn disappear."""
     return max(1, min(8, round(continuous_height)))
 
 
@@ -102,12 +100,9 @@ def _early_raster(continuous_heights: Sequence[float]) -> list[int]:
     return raster
 
 
-def _keep_positive_subcolumns_visible(
-    continuous_heights: Sequence[float], raster: Sequence[int]
-) -> list[int]:
+def _keep_valid_subcolumns_visible(raster: Sequence[int]) -> list[int]:
     """Restore the minimum dot if later contour shaping removed it."""
-    return [max(1, level) if height > 0 else level
-            for height, level in zip(continuous_heights, raster)]
+    return [max(1, level) for level in raster]
 
 
 def _sleep_residual_transfer(continuous_heights: Sequence[float], raster: Sequence[int]) -> list[int]:
@@ -315,7 +310,7 @@ def _chart_rows_and_percentages(
         raster = _sleep_residual_transfer(continuous_heights, baseline)
         raster = _smooth_sleep_edges(render_columns, raster, baseline, top, bottom,
                                      percentages_by_column)
-        raster = _keep_positive_subcolumns_visible(continuous_heights, raster)
+        raster = _keep_valid_subcolumns_visible(raster)
         for index, column in enumerate(render_columns):
             bucket_start = column_timestamp(column, now)
             center_timestamp = bucket_start + COLUMN_SECONDS / 2
@@ -349,8 +344,8 @@ def _chart_rows_and_percentages(
             left_timestamp, right_timestamp = _braille_subcolumn_times(bucket_start, COLUMN_SECONDS)
             subcolumn_percentages.extend((forecast_percentage(left_timestamp), forecast_percentage(right_timestamp)))
         continuous_heights = [percentage / 100 * 8 for percentage in subcolumn_percentages]
-        raster = _keep_positive_subcolumns_visible(
-            continuous_heights, _early_raster(continuous_heights)
+        raster = _keep_valid_subcolumns_visible(
+            _early_raster(continuous_heights)
         )
         for index, column in enumerate(forecast_columns):
             bucket_start = column_timestamp(column, now)

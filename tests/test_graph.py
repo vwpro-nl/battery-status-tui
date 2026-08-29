@@ -176,14 +176,13 @@ class GraphTests(unittest.TestCase):
             with self.subTest(percentage=percentage):
                 top, bottom = _braille_fill(percentage)
                 dots = sum((ord(character) - 0x2800).bit_count() for character in (top, bottom) if character != " ")
-                self.assertEqual(dots // 2, round(percentage / 100 * 8))
+                self.assertEqual(dots // 2, max(1, round(percentage / 100 * 8)))
 
-    def test_low_positive_braille_subcolumns_keep_one_dot_but_zero_stays_empty(self):
-        for percentage in (1, 5, 10):
+    def test_low_braille_subcolumns_keep_one_dot_including_zero(self):
+        for percentage in (0, 1, 5, 10):
             with self.subTest(percentage=percentage):
                 top, bottom = _braille_fill(percentage)
-                self.assertNotEqual((top, bottom), (" ", " "))
-        self.assertEqual(_braille_fill(0), (" ", " "))
+                self.assertEqual((top, bottom), (" ", "⣀"))
 
     def test_braille_fill_maximizes_complete_cells_and_only_partially_fills_top(self):
         self.assertEqual(_braille_fill(50), (" ", "⣿"))
@@ -574,11 +573,11 @@ class GraphTests(unittest.TestCase):
                 column = project_column(stamp(20), self.now)
                 self.assertNotEqual((top[column], bottom[column]), (" ", " "))
 
-    def test_zero_soc_sleep_can_remain_empty(self):
+    def test_valid_zero_soc_sleep_keeps_one_bottom_dot_per_subcolumn(self):
         sleep = SleepInterval(stamp(20), stamp(20, 20), pre_percentage=0, post_percentage=0)
         top, bottom = chart_rows(self.current, [], None, self.now, [sleep])
         column = project_column(stamp(20), self.now)
-        self.assertEqual((top[column], bottom[column]), (" ", " "))
+        self.assertEqual((top[column], bottom[column]), (" ", "⣀"))
 
     def test_sparse_active_history_after_sleep_does_not_bridge_empty_bucket(self):
         sleep = SleepInterval(stamp(19, 40), stamp(20), pre_percentage=10, post_percentage=9)
