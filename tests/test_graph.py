@@ -417,6 +417,25 @@ class GraphTests(unittest.TestCase):
             self.assertEqual(percentages[column], percentage)
             self.assertIn(_battery_color(percentage), styled)
 
+    def test_observed_zero_is_visible_and_distinct_from_unknown(self):
+        zero_column = project_column(stamp(20, 40), self.now)
+        unknown_column = project_column(stamp(20, 20), self.now)
+        top, bottom, percentages = _chart_rows_and_percentages(
+            self.current, [sample(stamp(20, 40), 0)], None, self.now
+        )
+        self.assertEqual((top[zero_column], bottom[zero_column]), (" ", "▁"))
+        self.assertEqual(percentages[zero_column], 0)
+        self.assertEqual((top[unknown_column], bottom[unknown_column]), (" ", " "))
+        self.assertIsNone(percentages[unknown_column])
+        self.assertEqual(_battery_color(0), "\x1b[38;2;85;10;20m")
+        self.assertIn(f"{_battery_color(0)}▁{graph_module.RESET}",
+                      _style_battery(bottom, percentages))
+
+    def test_positive_solid_history_quantization_is_unchanged(self):
+        self.assertEqual(_fill_chars(1), (" ", " "))
+        self.assertEqual(_fill_chars(5), (" ", "▁"))
+        self.assertEqual(_fill_chars(50), (" ", "█"))
+
     def test_charging_forecast_uses_changing_gradient_colors(self):
         current = Measurement(self.now, 60, "charging", True)
         top, bottom, percentages = _chart_rows_and_percentages(
