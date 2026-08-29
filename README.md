@@ -173,12 +173,6 @@ Full details: [docs/graph.md](docs/graph.md).
 
 ## Screenshots
 
-<!-- Real terminal captures are added in a follow-up step. Intended set:
-     1. discharging with a forecast reaching empty
-     2. charging with a plateau at 100%
-     3. a history window containing a sleep/hibernate gap and an unknown gap
--->
-
 ![battery-status-tui dashboard](docs/assets/battery-status-tui.png)
 
 ## Limitations
