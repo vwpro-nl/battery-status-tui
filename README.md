@@ -26,35 +26,36 @@ dashboard can consume its database later without coupling to the collector.
 - Robust ETA from a Theil–Sen session trend, not a single instantaneous rate.
 - Crash-safe schema-v4 storage: append-only event log, immutable hourly
   aggregates, rotating verified checkpoints, and automatic recovery.
-- Suspend/hibernate reconstruction from clocks, the logind signal, and the
-  kernel journal — including hibernation across a cold boot.
+- Suspend/hibernate reconstruction from clocks and the kernel journal —
+  including hibernation across a cold boot.
 
 ## Requirements
 
 - Linux with `/sys/class/power_supply` **and/or** UPower (`upower` CLI).
-- Python 3.11 or newer. No third-party packages.
+- Python 3.11 or newer, plus `pip` for installation. The application itself has
+  no third-party runtime packages.
 - A terminal with Unicode (block + Braille glyphs) and 24-bit color for the
   graph. Check yours with `battery-status-tui --unicode-probe`.
 - Optional, each degrades gracefully if absent:
-  - `busctl` (systemd) — live suspend/resume detection via logind;
   - `journalctl` — durable suspend/hibernate reconstruction;
   - `powerprofilesctl` / `busctl` / `/sys/firmware/acpi/platform_profile` —
     power-profile display.
 
 ## Installation
 
-Run it straight from a checkout — no packaging step:
+From a release archive or Git checkout, install the existing console entry
+point into your user prefix:
 
 ```bash
-git clone <repo-url> battery-status-tui
 cd battery-status-tui
-./battery-status-tui --sample
-./battery-status-tui --once
+if [ -L ~/.local/bin/battery-status-tui ]; then rm ~/.local/bin/battery-status-tui; fi
+python3 -m pip install --user .
+test -x ~/.local/bin/battery-status-tui
 ```
 
-The `battery-status-tui` wrapper script adds `src/` to `sys.path`. If you prefer
-a console entry point, `pip install .` also installs a `battery-status-tui`
-command.
+Ensure `~/.local/bin` is on `PATH`. No root access is needed.
+The conditional removal only clears the pre-1.0 development symlink, if one is
+present; it never removes an installed regular executable.
 
 ### Background sampling
 
@@ -62,23 +63,33 @@ The canonical collector is a user timer that runs one short-lived `--sample`
 process per minute:
 
 ```bash
-mkdir -p ~/.local/bin ~/.config/systemd/user
-ln -s "$PWD/battery-status-tui" ~/.local/bin/battery-status-tui
-cp systemd/battery-status-tui.service systemd/battery-status-tui.timer ~/.config/systemd/user/
+install -Dm644 systemd/battery-status-tui.service ~/.config/systemd/user/battery-status-tui.service
+install -Dm644 systemd/battery-status-tui.timer ~/.config/systemd/user/battery-status-tui.timer
 systemctl --user daemon-reload
 systemctl --user enable --now battery-status-tui.timer
 ```
 
-The symlink resolves back to the checkout so the wrapper can find `src/`. No
-root needed. Inspect with `systemctl --user status battery-status-tui.timer` and
+The service executes `~/.local/bin/battery-status-tui --sample`. Inspect it with
+`systemctl --user status battery-status-tui.timer` and
 `journalctl --user -u battery-status-tui.service`.
+
+To update from a newer checkout or release archive:
+
+```bash
+python3 -m pip install --user --upgrade .
+install -Dm644 systemd/battery-status-tui.service ~/.config/systemd/user/battery-status-tui.service
+install -Dm644 systemd/battery-status-tui.timer ~/.config/systemd/user/battery-status-tui.timer
+systemctl --user daemon-reload
+systemctl --user restart battery-status-tui.timer
+```
 
 To remove just this:
 
 ```bash
 systemctl --user disable --now battery-status-tui.timer
-rm ~/.config/systemd/user/battery-status-tui.{service,timer} ~/.local/bin/battery-status-tui
+rm ~/.config/systemd/user/battery-status-tui.{service,timer}
 systemctl --user daemon-reload
+python3 -m pip uninstall battery-status-tui
 ```
 
 Nothing is installed or enabled automatically. Continuous history requires the
@@ -106,7 +117,7 @@ When stdout is not a terminal, the program renders once and exits, so
 | `--sample` | Take one sample, print a single terse line (`<epoch> <soc>% <state> <power>`), exit. Used by the systemd timer. |
 | `--interval SECONDS` | Interactive refresh interval (default `60`). |
 | `--database PATH` | Use an alternate SQLite history file (default `${XDG_STATE_HOME:-~/.local/state}/battery-status-tui/history.sqlite3`). |
-| `--diagnose` | Print resolved source, power method/confidence/window, per-battery raw candidates, capacity, health, cycles, session, identity, and database path. |
+| `--diagnose` | Inspect live sources and print power, health, session, identity, and database details without collecting or modifying the history database. |
 | `--unicode-probe` | Print the block/Braille/axis glyphs the renderer uses, to verify terminal font support. |
 | `--version` | Print the version and exit. |
 
@@ -116,7 +127,7 @@ exclusive.
 ## Reading the graph
 
 ```
-BATTERY            SoC 72%   ↑ 12.4 W (balanced)
+BATTERY         SoC 72% ↑  12.4 W (balanced)
 0h48  ▁▂▃▄▅▆▇█…│⠈⠐⠠     3h10 ~19:40
 start ▁▂▃▄▅▆▇█…│⠁⠂⠄     full
       ┬─────┬─────┬─────┬─────┬─────┬─────┬
@@ -168,7 +179,7 @@ Full details: [docs/graph.md](docs/graph.md).
      3. a history window containing a sleep/hibernate gap and an unknown gap
 -->
 
-_Screenshots pending._
+![battery-status-tui dashboard](docs/assets/battery-status-tui.png)
 
 ## Limitations
 
@@ -180,8 +191,8 @@ _Screenshots pending._
 - The graph needs a Unicode + 24-bit-color terminal; without them it is
   unreadable (use `--diagnose` for plain text).
 - Suspend/hibernate is classified as *sleep* only with positive evidence
-  (clock discontinuity, journal record, or logind signal). Without it, a gap
-  stays *unknown* by design.
+  (clock discontinuity or journal record). Without it, a gap stays *unknown*
+  by design.
 - ETA needs a few minutes of consistent trend before it appears; brief spikes
   are rejected rather than smoothed.
 - Time-derived power (`~X.X W`) needs at least two minutes of matching awake

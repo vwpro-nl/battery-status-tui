@@ -110,7 +110,7 @@ so shaping can never make known data vanish.
 ## Title line, labels, and readouts
 
 ```
-BATTERY            SoC 72%   ↑ 12.4 W (balanced)
+BATTERY         SoC 72% ↑  12.4 W (balanced)
 0h48  ▁▂▃▄▅▆▇█…│⠈⠐⠠     3h10 ~19:40
 start ▁▂▃▄▅▆▇█…│⠁⠂⠄     full
       ┬─────┬─────┬─────┬─────┬─────┬─────┬

@@ -792,6 +792,27 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(rendered.index("SoC"), GRAPH_OFFSET + NOW_INDEX - len("SoC 64%") - 1)
         self.assertEqual(rendered.index("↓"), GRAPH_OFFSET + NOW_INDEX)
 
+    def test_soc_digit_boundaries_keep_downstream_title_columns_fixed(self):
+        expected = {
+            9: "BATTERY          SoC 9% ↓  10.8 W (balanced)",
+            10: "BATTERY         SoC 10% ↓  10.8 W (balanced)",
+            99: "BATTERY         SoC 99% ↓  10.8 W (balanced)",
+            100: "BATTERY        SoC 100% ↓  10.8 W (balanced)",
+        }
+        columns = set()
+        for soc, title in expected.items():
+            with self.subTest(soc=soc):
+                current = Measurement(
+                    self.now, soc, "discharging", False, power_w=10.8,
+                )
+                rendered = plain(title_line(current, "balanced"))
+                self.assertEqual(rendered, title)
+                columns.add((
+                    rendered.index("%"), rendered.index("↓"),
+                    rendered.index("."), rendered.index("W"), rendered.index("("),
+                ))
+        self.assertEqual(columns, {(22, 24, 29, 32, 34)})
+
     def test_missing_profile_keeps_header_clean(self):
         rendered = plain(title_line(self.current))
         self.assertIn("SoC 48% ↓   8.4 W", rendered)

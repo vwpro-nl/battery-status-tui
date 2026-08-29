@@ -54,9 +54,8 @@ First public release.
   validation.
 - Automatic recovery: on start the collector selects the newest intact
   checkpoint generation; finalized hours are immutable and never double-counted.
-- Suspend/hibernate reconstruction from three independent sources (monotonic vs.
-  boottime clocks, the logind `PrepareForSleep` signal, and the kernel
-  journal), including hibernation across a full cold boot.
+- Suspend/hibernate reconstruction from monotonic-vs-boottime clocks and the
+  kernel journal, including hibernation across a full cold boot.
 - Sticky battery identity (`base|model|serial`) that tolerates drivers dropping
   optional metadata but detects a real battery swap.
 - Slow-changing capacity/wear stored as `battery_health` change events.
@@ -69,6 +68,8 @@ First public release.
   sole writer; no resident daemon is used.
 - Ordinary interactive use, `--once`, and non-TTY output are read-only SQLite
   viewers. Multiple viewers are safe and never poll collector sources.
+- `--diagnose` may inspect live hardware but never records a sample or creates
+  or modifies the history database.
 - Viewers wait for the first checkpoint and report stale data after
   `max(3 × configured interval, 180 seconds)` without moving stale ETA state.
 - A legacy schema-v0/v1/v2 database is refused by the viewer with explicit
@@ -85,4 +86,5 @@ First public release.
 ### Packaging
 
 - MIT licensed. Python standard library only. No root, no system-wide daemon.
-- Systemd user timer for one short-lived sample per minute.
+- Packaged `battery-status-tui` console entry point and systemd user timer for
+  one short-lived sample per minute.

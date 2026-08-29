@@ -72,7 +72,9 @@ The hourly aggregates keep `direct_power_ms`, `estimated_power_ms` and
 `battery-status-tui --diagnose` prints the resolved method, approximate flag,
 confidence, observation window and raw candidates per physical battery,
 alongside full and design capacity, resolved health, cycle count, the active
-session, the battery identity, and the database path.
+session, the battery identity, and the database path. It may inspect live
+hardware, but it does not collect a sample or create or modify the history
+database.
 
 ## See also
 

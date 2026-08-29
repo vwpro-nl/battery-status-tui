@@ -23,10 +23,10 @@ counted as `unknown_ms`.
 ### Unknown stays unknown without evidence
 
 The collector never guesses. A gap becomes `sleep` only if there is positive
-proof — a clock discontinuity, a journal suspend/hibernate record, or a live
-logind signal. A gap with no such evidence stays `unknown` forever, even if it
-"looks like" the laptop was asleep. The renderer shows unknown spans as empty
-(see [graph.md](graph.md)), distinct from an observed 0% battery.
+proof — a clock discontinuity or a journal suspend/hibernate record. A gap with
+no such evidence stays `unknown` forever, even if it "looks like" the laptop
+was asleep. The renderer shows unknown spans as empty (see [graph.md](graph.md)),
+distinct from an observed 0% battery.
 
 ## Continuity breaks
 
@@ -68,24 +68,21 @@ two batteries.
 
 ## Suspend and hibernate reconstruction
 
-Three independent detectors feed `sleep_intervals`:
+Two recovery detectors feed `sleep_intervals` in the timer-driven v1 runtime:
 
-1. **logind (live).** A background listener on the logind `PrepareForSleep`
-   D-Bus signal (`busctl monitor`). Marks the entry and, on resume, closes the
-   interval. `source = "logind"`.
-2. **Clocks (proven after the fact).** On the first poll after resume the
+1. **Clocks (proven after the fact).** On the first poll after resume the
    collector compares the boottime delta with the monotonic delta since the
    last checkpoint. `CLOCK_BOOTTIME` advances during suspend; `CLOCK_MONOTONIC`
    does not. A difference over 5 s is a proven sleep span of that length,
    ending at the current poll. `source = "clocks"`.
-3. **Journal.** `journalctl -b all -k` is parsed for `PM: suspend entry` /
+2. **Journal.** `journalctl -b all -k` is parsed for `PM: suspend entry` /
    `PM: suspend exit` and `PM: hibernation: hibernation entry` /
    `PM: hibernation: hibernation exit`. `source = "journal"`,
    `kind = "suspend" | "hibernate"`.
 
-Overlapping detections from different sources are merged into one interval;
-bound precedence is `clocks < journal < logind`. `pre_soc` / `post_soc` are
-filled from the polls (or events) bracketing the interval.
+Overlapping detections are merged into one interval; journal evidence can
+replace less precise clock-derived bounds. `pre_soc` / `post_soc` are filled
+from the polls (or events) bracketing the interval.
 
 ### Hibernation across a cold boot
 
