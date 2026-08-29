@@ -67,9 +67,16 @@ def _braille_mask(left_count: int, right_count: int) -> str:
 
 def _braille_fill(left_percentage: float, right_percentage: float | None = None) -> tuple[str, str]:
     right_percentage = left_percentage if right_percentage is None else right_percentage
-    left_levels = max(0, min(8, round(left_percentage / 100 * 8)))
-    right_levels = max(0, min(8, round(right_percentage / 100 * 8)))
+    left_levels = _braille_level(left_percentage / 100 * 8)
+    right_levels = _braille_level(right_percentage / 100 * 8)
     return _braille_fill_levels(left_levels, right_levels)
+
+
+def _braille_level(continuous_height: float) -> int:
+    """Quantize a valid positive SoC without making its subcolumn disappear."""
+    if continuous_height <= 0:
+        return 0
+    return max(1, min(8, round(continuous_height)))
 
 
 def _braille_fill_levels(left_levels: int, right_levels: int) -> tuple[str, str]:
@@ -81,7 +88,7 @@ def _braille_fill_levels(left_levels: int, right_levels: int) -> tuple[str, str]
 
 def _early_raster(continuous_heights: Sequence[float]) -> list[int]:
     """Shift clear monotone round() transitions one subcolumn earlier."""
-    rounded = [max(0, min(8, round(height))) for height in continuous_heights]
+    rounded = [_braille_level(height) for height in continuous_heights]
     raster = rounded.copy()
     for index in range(1, len(continuous_heights)):
         earlier = index - 1
@@ -93,6 +100,14 @@ def _early_raster(continuous_heights: Sequence[float]) -> list[int]:
                 and slope * previous_slope > 0 and abs(rounded[index] - rounded[earlier]) == 1):
             raster[earlier] = rounded[index]
     return raster
+
+
+def _keep_positive_subcolumns_visible(
+    continuous_heights: Sequence[float], raster: Sequence[int]
+) -> list[int]:
+    """Restore the minimum dot if later contour shaping removed it."""
+    return [max(1, level) if height > 0 else level
+            for height, level in zip(continuous_heights, raster)]
 
 
 def _sleep_residual_transfer(continuous_heights: Sequence[float], raster: Sequence[int]) -> list[int]:
@@ -300,6 +315,7 @@ def _chart_rows_and_percentages(
         raster = _sleep_residual_transfer(continuous_heights, baseline)
         raster = _smooth_sleep_edges(render_columns, raster, baseline, top, bottom,
                                      percentages_by_column)
+        raster = _keep_positive_subcolumns_visible(continuous_heights, raster)
         for index, column in enumerate(render_columns):
             bucket_start = column_timestamp(column, now)
             center_timestamp = bucket_start + COLUMN_SECONDS / 2
@@ -332,7 +348,10 @@ def _chart_rows_and_percentages(
             bucket_start = column_timestamp(column, now)
             left_timestamp, right_timestamp = _braille_subcolumn_times(bucket_start, COLUMN_SECONDS)
             subcolumn_percentages.extend((forecast_percentage(left_timestamp), forecast_percentage(right_timestamp)))
-        raster = _early_raster([percentage / 100 * 8 for percentage in subcolumn_percentages])
+        continuous_heights = [percentage / 100 * 8 for percentage in subcolumn_percentages]
+        raster = _keep_positive_subcolumns_visible(
+            continuous_heights, _early_raster(continuous_heights)
+        )
         for index, column in enumerate(forecast_columns):
             bucket_start = column_timestamp(column, now)
             center_timestamp = bucket_start + COLUMN_SECONDS / 2
