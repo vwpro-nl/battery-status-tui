@@ -136,6 +136,12 @@ def render_v1(storage: V1Storage, *, now: int | None = None,
               current: Measurement | None = None) -> str:
     """Render the locked dashboard entirely through read-only schema-v4 accessors."""
     view = read_v1_view(storage, now=now)
+    return render_v1_view(view, now=now, current=current)
+
+
+def render_v1_view(view: V1HistorySnapshot, *, now: int | None = None,
+                   current: Measurement | None = None) -> str:
+    """Render one already-loaded, internally consistent read-only snapshot."""
     displayed = view.current if current is None else current
     render_now = displayed.timestamp if now is None else now
     estimate = estimate_remaining(displayed, view.trend_history, displayed.timestamp)

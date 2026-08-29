@@ -65,9 +65,14 @@ First public release.
 
 - `--once`, `--sample`, `--interval`, `--database`, `--diagnose`,
   `--unicode-probe`, `--version`.
-- Non-TTY stdout renders once automatically.
-- The normal CLI runs natively on schema v4; a legacy schema-v0/v1/v2 database
-  is opened on the legacy runtime and is never migrated automatically.
+- The systemd timer invoking `--sample` once per minute is the canonical and
+  sole writer; no resident daemon is used.
+- Ordinary interactive use, `--once`, and non-TTY output are read-only SQLite
+  viewers. Multiple viewers are safe and never poll collector sources.
+- Viewers wait for the first checkpoint and report stale data after
+  `max(3 × configured interval, 180 seconds)` without moving stale ETA state.
+- A legacy schema-v0/v1/v2 database is refused by the viewer with explicit
+  conversion guidance and is never migrated automatically.
 
 ### Migration tooling (pre-1.0 users only)
 
@@ -80,4 +85,4 @@ First public release.
 ### Packaging
 
 - MIT licensed. Python standard library only. No root, no system-wide daemon.
-- Optional systemd user timer for one sample per minute.
+- Systemd user timer for one short-lived sample per minute.

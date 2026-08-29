@@ -48,6 +48,7 @@ Run it straight from a checkout — no packaging step:
 ```bash
 git clone <repo-url> battery-status-tui
 cd battery-status-tui
+./battery-status-tui --sample
 ./battery-status-tui --once
 ```
 
@@ -55,9 +56,10 @@ The `battery-status-tui` wrapper script adds `src/` to `sys.path`. If you prefer
 a console entry point, `pip install .` also installs a `battery-status-tui`
 command.
 
-### Optional: background sampling
+### Background sampling
 
-A user timer records one sample per minute without keeping a process resident:
+The canonical collector is a user timer that runs one short-lived `--sample`
+process per minute:
 
 ```bash
 mkdir -p ~/.local/bin ~/.config/systemd/user
@@ -79,14 +81,16 @@ rm ~/.config/systemd/user/battery-status-tui.{service,timer} ~/.local/bin/batter
 systemctl --user daemon-reload
 ```
 
-Nothing is installed or enabled automatically. Run **one** writer against a
-database — an interactive session or the timer, not both.
+Nothing is installed or enabled automatically. Continuous history requires the
+timer (or an equivalent regular `--sample` invocation). It is the sole writer;
+ordinary viewers never collect or modify the database.
 
 ## Quick start
 
 ```bash
-battery-status-tui              # interactive, refreshes every 60 s
-battery-status-tui --once       # sample once, print the dashboard, exit
+battery-status-tui              # interactive read-only viewer
+battery-status-tui --once       # read-only dashboard, then exit
+battery-status-tui --sample     # collect and record one sample
 battery-status-tui --diagnose   # detailed source and health readout
 ```
 
@@ -97,8 +101,8 @@ When stdout is not a terminal, the program renders once and exits, so
 
 | Option | Effect |
 |---|---|
-| *(none)* | Interactive dashboard; redraws every `--interval` seconds and on suspend/resume or profile change. `Ctrl-C` to exit. |
-| `--once` | Take one sample, print the dashboard, exit. |
+| *(none)* | Read-only interactive dashboard; redraws committed SQLite state every `--interval` seconds. `Ctrl-C` to exit. |
+| `--once` | Print one read-only dashboard from the latest checkpoint and exit. |
 | `--sample` | Take one sample, print a single terse line (`<epoch> <soc>% <state> <power>`), exit. Used by the systemd timer. |
 | `--interval SECONDS` | Interactive refresh interval (default `60`). |
 | `--database PATH` | Use an alternate SQLite history file (default `${XDG_STATE_HOME:-~/.local/state}/battery-status-tui/history.sqlite3`). |
@@ -169,7 +173,10 @@ _Screenshots pending._
 ## Limitations
 
 - Linux only; needs sysfs power-supply data or UPower.
-- One writer per database. Two resident sessions on one file is unsupported.
+- `--sample` is the sole writer. Multiple ordinary viewers are safe, but two
+  sampling processes against one database are unsupported.
+- Without the timer or another regular `--sample`, history stops advancing and
+  the viewer reports stale data rather than presenting it as current.
 - The graph needs a Unicode + 24-bit-color terminal; without them it is
   unreadable (use `--diagnose` for plain text).
 - Suspend/hibernate is classified as *sleep* only with positive evidence

@@ -186,11 +186,13 @@ the newest **3** valid generations and deletes the rest.
 
 ## One-writer expectation
 
-WAL plus `BEGIN IMMEDIATE` serializes writers, but the design assumes **exactly
-one writer**: either an interactive `battery-status-tui` session or the
-per-minute `--sample` timer, not both, and not two resident TUIs on the same
-database. Any number of read-only consumers can run concurrently. Running two
-resident writers against one database is not a supported configuration.
+WAL plus `BEGIN IMMEDIATE` serializes transactions, but the v1 deployment model
+requires **exactly one writer**: the per-minute systemd timer invoking
+`battery-status-tui --sample`. Ordinary interactive use, `--once`, and piped
+rendering open only read-only SQLite connections. Any number of viewers can run
+concurrently; running a second sampling process against the same database is
+not supported. If sampling stops, the viewer reports the checkpoint as stale
+after `max(3 × configured interval, 180 seconds)`.
 
 ## Backup implications
 

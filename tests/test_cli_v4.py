@@ -14,7 +14,8 @@ import signal
 import sqlite3
 import tempfile
 import unittest
-from contextlib import closing, redirect_stdout
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -106,52 +107,49 @@ def user_version(path: Path) -> int:
         return int(db.execute("PRAGMA user_version").fetchone()[0])
 
 
-class _FakeMonitor:
-    """A logind monitor stand-in with no events."""
-
-    def __init__(self) -> None:
-        import threading
-
-        self.wakeup = threading.Event()
-
-    def start(self) -> None:
-        pass
-
-    def drain(self):
-        return []
-
-    def close(self) -> None:
-        pass
-
-
 def run_cli(args: list[str], source: FakeSource,
-            clock: FakeClock | None = None, *, stop_after_polls: int | None = None
+            clock: FakeClock | None = None, *, stop_after_polls: int | None = None,
+            forbid_collector_components: bool = False,
+            after_view=None,
             ) -> tuple[int, str]:
     buffer = io.StringIO()
-    patches = [
-        patch("battery_status_tui.cli.BatterySource", return_value=source),
-        patch("battery_status_tui.cli.journal_intervals", lambda since: []),
-        patch("battery_status_tui.cli.PowerProfileResolver", _NoProfile),
-    ]
+    if forbid_collector_components:
+        forbidden = AssertionError("read-only viewer touched a collector component")
+        patches = [
+            patch("battery_status_tui.cli.BatterySource", side_effect=forbidden),
+            patch("battery_status_tui.cli.PowerProfileResolver", side_effect=forbidden),
+            patch("battery_status_tui.cli.collect_v1", side_effect=forbidden),
+            patch("battery_status_tui.cli.journal_intervals", side_effect=forbidden),
+            patch("battery_status_tui.cli.LogindMonitor", side_effect=forbidden),
+        ]
+    else:
+        patches = [
+            patch("battery_status_tui.cli.BatterySource", return_value=source),
+            patch("battery_status_tui.cli.journal_intervals", lambda since: []),
+            patch("battery_status_tui.cli.PowerProfileResolver", _NoProfile),
+        ]
     if clock is not None:
         patches.append(patch("battery_status_tui.cli.time.time", clock.time))
+        patches.append(patch("battery_status_tui.cli.time.monotonic", clock.time))
         patches.append(patch("battery_status_tui.cli.time.sleep", clock.sleep))
     if stop_after_polls is not None:
         # Drive the real interactive loop, then interrupt it (as Ctrl-C would)
-        # once it has completed the requested number of polls.
-        patches.append(patch("battery_status_tui.cli.LogindMonitor", _FakeMonitor))
-        real_collect = cli.collect_v1
+        # once it has completed the requested number of read-only redraws.
+        real_render = cli._render_v4_view
         seen = [0]
 
-        def counting_collect(*a, **kw):
-            result = real_collect(*a, **kw)
-            seen[0] += 1
-            if seen[0] >= stop_after_polls:
-                os.kill(os.getpid(), signal.SIGINT)
-            return result
+        def counting_render(*a, **kw):
+            try:
+                return real_render(*a, **kw)
+            finally:
+                seen[0] += 1
+                if after_view is not None:
+                    after_view(seen[0])
+                if seen[0] >= stop_after_polls:
+                    os.kill(os.getpid(), signal.SIGINT)
 
-        patches.append(patch("battery_status_tui.cli.collect_v1", counting_collect))
-    with redirect_stdout(buffer):
+        patches.append(patch("battery_status_tui.cli._render_v4_view", counting_render))
+    with redirect_stdout(buffer), redirect_stderr(buffer):
         if stop_after_polls is not None:
             buffer.isatty = lambda: True  # force the interactive loop
         for item in patches:
@@ -178,17 +176,23 @@ class V4CliRuntimeTests(unittest.TestCase):
     def poll_once(self, source: FakeSource) -> tuple[int, str]:
         code, out = run_cli(
             ["--database", str(self.path), "--interval", str(POLL_INTERVAL_S),
-             "--once"], source, self.clock,
+             "--sample"], source, self.clock,
         )
         self.clock.advance(POLL_INTERVAL_S)
         return code, out
+
+    def view_once(self, source: FakeSource | None = None) -> tuple[int, str]:
+        return run_cli(
+            ["--database", str(self.path), "--once"], source or FakeSource(), self.clock,
+            forbid_collector_components=True,
+        )
 
     # ------------------------------------------------------------------
     # Regression: the exact failure that forced the rollback
     # ------------------------------------------------------------------
     def test_supported_v4_database_is_usable_by_normal_entrypoint(self) -> None:
-        make_v4_db(self.path)
-        code, out = self.poll_once(FakeSource())
+        self.poll_once(FakeSource())
+        code, out = self.view_once()
         self.assertEqual(code, 0, out)
         self.assertEqual(user_version(self.path), 4)
         self.assertEqual(len(self.rows("checkpoint_generations")), 1)
@@ -203,7 +207,8 @@ class V4CliRuntimeTests(unittest.TestCase):
 
     def test_fresh_database_is_born_at_schema_v4(self) -> None:
         self.assertFalse(self.path.exists())
-        code, _ = self.poll_once(FakeSource())
+        code, _ = run_cli(["--database", str(self.path), "--sample"],
+                          FakeSource(), self.clock)
         self.assertEqual(code, 0)
         self.assertEqual(user_version(self.path), 4)
 
@@ -211,20 +216,20 @@ class V4CliRuntimeTests(unittest.TestCase):
     # Required CLI modes against schema v4
     # ------------------------------------------------------------------
     def test_once_renders_dashboard_from_v4(self) -> None:
-        make_v4_db(self.path)
-        code, out = self.poll_once(FakeSource())
+        self.poll_once(FakeSource())
+        code, out = self.view_once()
         self.assertEqual(code, 0)
         self.assertNotIn("battery-status-tui:", out)
         self.assertGreaterEqual(len(out.splitlines()), 3)
 
     def test_diagnose_reads_v4_and_writes_no_checkpoint(self) -> None:
-        make_v4_db(self.path)
+        self.assertFalse(self.path.exists())
         code, out = run_cli(["--database", str(self.path), "--diagnose"], FakeSource())
         self.assertEqual(code, 0)
         self.assertIn(f"database: {self.path}", out)
         self.assertIn("battery identity: BAT0|Primary|SER123", out)
         self.assertIn("active session:", out)
-        self.assertEqual(len(self.rows("checkpoint_generations")), 0)
+        self.assertFalse(self.path.exists())
 
     def test_sample_line_and_checkpoint_from_v4(self) -> None:
         make_v4_db(self.path)
@@ -235,17 +240,173 @@ class V4CliRuntimeTests(unittest.TestCase):
         self.assertEqual(len(self.rows("checkpoint_generations")), 1)
 
     def test_default_mode_renders_once_when_stdout_is_not_a_tty(self) -> None:
-        make_v4_db(self.path)
+        self.poll_once(FakeSource())
         code, out = run_cli(["--database", str(self.path),
                              "--interval", str(POLL_INTERVAL_S)],
-                            FakeSource(), self.clock)
+                            FakeSource(), self.clock, forbid_collector_components=True)
         self.assertEqual(code, 0)
         self.assertNotIn("battery-status-tui:", out)
 
+    def test_once_and_restarted_viewers_leave_database_unchanged(self) -> None:
+        self.poll_once(FakeSource())
+
+        def permanent_state():
+            with V1Storage(self.path).reader() as db:
+                return tuple(
+                    (table, db.execute(f"SELECT count(*) FROM {table}").fetchone()[0])
+                    for table in ("checkpoint_generations", "state_events", "sessions",
+                                  "hourly_history", "sleep_intervals")
+                )
+
+        before = permanent_state()
+        mtime = self.path.stat().st_mtime_ns
+        for _ in range(3):
+            code, out = self.view_once()
+            self.assertEqual(code, 0, out)
+        self.assertEqual(permanent_state(), before)
+        self.assertEqual(self.path.stat().st_mtime_ns, mtime)
+
+    def test_missing_database_once_is_actionable_and_does_not_create_it(self) -> None:
+        code, out = self.view_once()
+        self.assertEqual(code, 1)
+        self.assertIn("waiting for first sample", out)
+        self.assertIn("--sample", out)
+        self.assertFalse(self.path.exists())
+
+    def test_interactive_missing_database_waits_without_creating_it(self) -> None:
+        code, out = run_cli(
+            ["--database", str(self.path), "--interval", "1"], FakeSource(), self.clock,
+            stop_after_polls=1, forbid_collector_components=True,
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("waiting for first sample", out)
+        self.assertFalse(self.path.exists())
+
+    def test_valid_database_without_checkpoint_waits_for_first_sample(self) -> None:
+        make_v4_db(self.path)
+        code, out = self.view_once()
+        self.assertEqual(code, 1)
+        self.assertIn("waiting for first sample", out)
+        self.assertEqual(self.rows("checkpoint_generations"), [])
+
+    def test_stale_checkpoint_reports_last_sample_without_rendering(self) -> None:
+        code, _ = run_cli(["--database", str(self.path), "--sample", "--interval", "60"],
+                          FakeSource(), self.clock)
+        self.assertEqual(code, 0)
+        self.clock.advance(181)
+        code, out = self.view_once()
+        self.assertEqual(code, 1)
+        self.assertIn("stale data (last sample", out)
+        self.assertIn("--sample", out)
+        self.assertNotIn("BATTERY", out)
+
+    def test_only_sample_creates_database_and_advances_generation(self) -> None:
+        code, _ = self.view_once()
+        self.assertEqual(code, 1)
+        self.assertFalse(self.path.exists())
+        code, _ = run_cli(["--database", str(self.path), "--sample"],
+                          FakeSource(), self.clock)
+        self.assertEqual(code, 0)
+        generation = V1Storage(self.path).recover().snapshot.generation
+        code, _ = self.view_once()
+        self.assertEqual(code, 0)
+        self.assertEqual(V1Storage(self.path).recover().snapshot.generation, generation)
+
+    def test_interactive_view_recovers_when_timer_creates_first_checkpoint(self) -> None:
+        timer_source = FakeSource(soc=63)
+
+        def timer_after_first_view(count: int) -> None:
+            if count == 1:
+                V1Collector(V1Storage(self.path)).process_poll(
+                    _measurement_at(timer_source, int(self.clock.time()))
+                )
+
+        code, out = run_cli(
+            ["--database", str(self.path), "--interval", "1"], FakeSource(), self.clock,
+            stop_after_polls=2, forbid_collector_components=True,
+            after_view=timer_after_first_view,
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("waiting for first sample", out)
+        self.assertIn("SoC 63%", out)
+
+    def test_interactive_view_recovers_when_timer_refreshes_stale_checkpoint(self) -> None:
+        V1Collector(V1Storage(self.path)).process_poll(
+            _measurement_at(FakeSource(soc=41), int(self.clock.time()))
+        )
+        self.clock.advance(181)
+
+        def timer_after_first_view(count: int) -> None:
+            if count == 1:
+                V1Collector(V1Storage(self.path)).process_poll(
+                    _measurement_at(FakeSource(soc=64), int(self.clock.time()))
+                )
+
+        code, out = run_cli(
+            ["--database", str(self.path), "--interval", "1"], FakeSource(), self.clock,
+            stop_after_polls=2, forbid_collector_components=True,
+            after_view=timer_after_first_view,
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("stale data (last sample", out)
+        self.assertIn("SoC 64%", out)
+
+    def test_interactive_redraw_reads_new_timer_checkpoint(self) -> None:
+        initial = FakeSource(soc=61)
+        V1Collector(V1Storage(self.path)).process_poll(
+            _measurement_at(initial, int(self.clock.time()))
+        )
+
+        def timer_after_first_view(count: int) -> None:
+            if count == 1:
+                self.clock.advance(60)
+                updated = FakeSource(soc=77)
+                V1Collector(V1Storage(self.path)).process_poll(
+                    _measurement_at(updated, int(self.clock.time()))
+                )
+
+        code, out = run_cli(
+            ["--database", str(self.path), "--interval", "1"], FakeSource(), self.clock,
+            stop_after_polls=2, forbid_collector_components=True,
+            after_view=timer_after_first_view,
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("SoC 61%", out)
+        self.assertIn("SoC 77%", out)
+
+    def test_multiple_concurrent_view_reads_are_harmless(self) -> None:
+        self.poll_once(FakeSource())
+        generation = V1Storage(self.path).recover().snapshot.generation
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            outputs = list(pool.map(
+                lambda _index: cli._render_v4_view(V1Storage(self.path), int(self.clock.time())),
+                range(8),
+            ))
+        self.assertTrue(all("BATTERY" in output for output in outputs))
+        self.assertEqual(V1Storage(self.path).recover().snapshot.generation, generation)
+
+    def test_projection_moves_only_after_post_boundary_checkpoint(self) -> None:
+        boundary = 1_800_000_000
+        self.clock.now = boundary - 10
+        source = FakeSource(soc=61)
+        V1Collector(V1Storage(self.path)).process_poll(
+            _measurement_at(source, int(self.clock.time()))
+        )
+        before = cli._render_v4_view(V1Storage(self.path), int(self.clock.time()))
+        self.clock.advance(20)
+        without_sample = cli._render_v4_view(V1Storage(self.path), int(self.clock.time()))
+        self.assertEqual(without_sample, before)
+        source.soc = 60
+        V1Collector(V1Storage(self.path)).process_poll(
+            _measurement_at(source, int(self.clock.time()))
+        )
+        after = cli._render_v4_view(V1Storage(self.path), int(self.clock.time()))
+        self.assertNotEqual(after, before)
+
     # ------------------------------------------------------------------
-    # Multi-poll invariants through the normal entrypoint
+    # Multi-poll invariants through the --sample entrypoint
     # ------------------------------------------------------------------
-    def test_repeated_normal_polls_hold_every_v4_invariant(self) -> None:
+    def test_repeated_samples_hold_every_v4_invariant(self) -> None:
         make_v4_db(self.path)
         source = FakeSource()
         for index in range(12):
@@ -288,7 +449,7 @@ class V4CliRuntimeTests(unittest.TestCase):
         self.assertTrue(points)
         self.assertEqual(points[-1].soc_millipercent, 51_000)
 
-    def test_restart_of_normal_cli_recovers_and_advances_generation(self) -> None:
+    def test_restarted_sample_process_recovers_and_advances_generation(self) -> None:
         make_v4_db(self.path)
         self.poll_once(FakeSource())
         self.poll_once(FakeSource())
@@ -358,29 +519,33 @@ class V4SameSecondFirstPollTests(unittest.TestCase):
                 .fetchone()[0], MAX_GENERATIONS)
 
     def test_once_then_interactive_startup_same_second(self) -> None:
-        code, _ = run_cli(["--database", str(self.path), "--once"], FakeSource(), self.clock)
+        code, _ = run_cli(["--database", str(self.path), "--sample"], FakeSource(), self.clock)
         self.assertEqual(code, 0)
-        gen_after_once = self.generations()
+        generations = self.generations()
+        code, _ = run_cli(["--database", str(self.path), "--once"], FakeSource(), self.clock,
+                          forbid_collector_components=True)
+        self.assertEqual(code, 0)
 
-        # Interactive startup in the very same second -- previously a traceback.
+        # Read-only startup in the same second never enters poll-spacing logic.
         code, out = run_cli(["--database", str(self.path), "--interval", "1"],
-                            FakeSource(), self.clock, stop_after_polls=1)
+                            FakeSource(), self.clock, stop_after_polls=1,
+                            forbid_collector_components=True)
         self.assertEqual(code, 0)
         self.assertNotIn("Traceback", out)
-        self.assertNotIn("must be later than recovered poll", out)
-        self.assertGreater(max(self.generations()), max(gen_after_once))
+        self.assertEqual(self.generations(), generations)
         self.assert_healthy()
 
     def test_rapid_interactive_restart_within_the_same_second(self) -> None:
-        first_gen = []
+        code, _ = run_cli(["--database", str(self.path), "--sample"], FakeSource(), self.clock)
+        self.assertEqual(code, 0)
+        generations = self.generations()
         for _ in range(3):  # three back-to-back interactive processes, clock barely moves
             code, out = run_cli(["--database", str(self.path), "--interval", "1"],
-                                FakeSource(), self.clock, stop_after_polls=1)
+                                FakeSource(), self.clock, stop_after_polls=1,
+                                forbid_collector_components=True)
             self.assertEqual(code, 0)
             self.assertNotIn("Traceback", out)
-            first_gen.append(max(self.generations()))
-        self.assertEqual(first_gen, sorted(first_gen))
-        self.assertGreater(first_gen[-1], first_gen[0])
+        self.assertEqual(self.generations(), generations)
         self.assert_healthy()
 
     def test_two_rapid_sample_invocations_same_second(self) -> None:

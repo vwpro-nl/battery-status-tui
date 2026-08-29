@@ -57,6 +57,7 @@ class V1HistorySnapshot:
     hourly_accumulator: HourlyAccumulator | None
     hourly_profiles: dict[int, dict[str, int]]
     generation: int
+    configured_interval_ms: int
     warnings: tuple[str, ...]
 
 
@@ -152,6 +153,7 @@ class V1History:
                 return V1HistorySnapshot(
                     current, history, trend, session, sleeps, health,
                     snapshot.power_profile, snapshot.hourly, profiles, snapshot.generation,
+                    snapshot.configured_interval_ms,
                     recovery.warnings,
                 )
         except (sqlite3.Error, V1StorageError) as error:

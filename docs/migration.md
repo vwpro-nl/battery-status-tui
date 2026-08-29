@@ -5,10 +5,10 @@ battery-status-tui.** Those builds created a schema-v2
 `history.sqlite3`. A fresh 1.0 install creates a schema-v4 database directly and
 needs no migration.
 
-The normal CLI still *opens* a schema-v0/v1/v2 database (on the legacy runtime),
-but it never migrates one forward to schema v4 automatically. Conversion is an
-explicit, offline, one-way step that produces a **new** file and never mutates
-the original.
+The read-only viewer requires schema v4 and refuses a schema-v0/v1/v2 database
+with conversion guidance. It never migrates one automatically. Conversion is
+an explicit, offline, one-way step that produces a **new** file and never
+mutates the original.
 
 ## Steps
 
@@ -59,8 +59,9 @@ recent-series tail. Exit status `0` and `PASS` mean the conversion is faithful.
 
 ### 4. Swap it in
 
-Stop any running writer (interactive session or the timer), then atomically
-replace the live database:
+Stop the sole writer (the sampling timer), then atomically replace the live
+database. Ordinary viewers are read-only, but close them during the swap so
+they do not retain an open handle to the replaced file:
 
 ```bash
 systemctl --user stop battery-status-tui.timer   # if you installed it

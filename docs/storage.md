@@ -37,7 +37,9 @@ process each minute rather than keeping a daemon resident.
 
 ## One writer
 
-Run a single writer against a database — either an interactive
-`battery-status-tui` session or the `--sample` timer, not both, and not two
-resident sessions. Any number of read-only consumers may run concurrently. See
+`battery-status-tui --sample` is the sole collection/write path. The supplied
+systemd timer invokes it once per minute; do not run a second sampling process
+against the same database. Ordinary interactive use, `--once`, and piped output
+are read-only, so any number of viewers may run concurrently. Without regular
+sampling, committed data eventually becomes stale and the viewer says so. See
 [architecture.md](architecture.md#one-writer-expectation).

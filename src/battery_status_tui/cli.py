@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import signal
 import sqlite3
 import sys
@@ -22,7 +23,7 @@ from .suspend import LogindMonitor, clock_sleep, journal_intervals
 from .system_status import HealthResolver, PowerProfileResolver
 from .v1_collector import V1CollectorError
 from .v1_history import V1History, V1HistoryError
-from .v1_runtime import collect_v1, render_v1
+from .v1_runtime import collect_v1, read_v1_view, render_v1_view
 from .v1_storage import V1Storage, V1StorageError
 
 
@@ -151,7 +152,7 @@ def diagnostic_text(measurement: Measurement, *, session: Session | None,
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description="Compact battery history and forecast TUI")
     mode = result.add_mutually_exclusive_group()
-    mode.add_argument("--once", action="store_true", help="sample and render once")
+    mode.add_argument("--once", action="store_true", help="render the stored dashboard once")
     mode.add_argument("--sample", action="store_true", help="record one sample without rendering")
     mode.add_argument("--diagnose", action="store_true", help="show source and battery-health details")
     mode.add_argument("--unicode-probe", action="store_true", help="show solid and Braille glyph candidates")
@@ -184,13 +185,39 @@ def _power_line(measurement: Measurement) -> str:
 V4_RUNTIME_ERRORS = (SourceUnavailable, V1CollectorError, V1HistoryError, V1StorageError)
 
 
+class V1ViewUnavailable(V1HistoryError):
+    """The read-only viewer has no sufficiently recent checkpoint to show."""
+
+
+def _render_v4_view(storage: V1Storage, now: int) -> str:
+    guidance = "run battery-status-tui --sample or enable battery-status-tui.timer"
+    if not storage.path.is_file():
+        raise V1ViewUnavailable(f"waiting for first sample; {guidance}")
+    try:
+        view = read_v1_view(storage, now=now)
+    except V1HistoryError as error:
+        if "no valid checkpoint" in str(error) or "no current point" in str(error):
+            raise V1ViewUnavailable(f"waiting for first sample; {guidance}") from error
+        raise
+    maximum_age_ms = max(3 * view.configured_interval_ms, 180_000)
+    age_ms = now * 1_000 - view.current.timestamp * 1_000
+    if age_ms > maximum_age_ms:
+        timestamp = dt.datetime.fromtimestamp(view.current.timestamp).astimezone().isoformat(
+            timespec="seconds"
+        )
+        raise V1ViewUnavailable(
+            f"stale data (last sample {timestamp}); {guidance}"
+        )
+    return render_v1_view(view)
+
+
 def _recovered_last_poll_second(storage: V1Storage) -> int:
     """Whole second of the last poll persisted in the recovered checkpoint.
 
     The schema-v4 collector requires every poll's second to be strictly greater
     than the recovered checkpoint's ``last_poll_at_ms``.  A freshly started
     process must not poll in the same second as the previous run's final poll,
-    so the interactive poll-spacing guard is seeded from this value rather than
+    so the ``--sample`` poll-spacing guard is seeded from this value rather than
     from zero.  Returns 0 when there is no valid checkpoint (cold start).
     """
     snapshot = storage.recover().snapshot
@@ -208,72 +235,77 @@ def main(argv: list[str] | None = None) -> int:
         print(f"battery-status-tui: unsupported database schema v{version} at "
               f"{args.database}; no runtime for this version", file=sys.stderr)
         return 1
-    # A fresh database (``version is None``) is born at the native schema v4.
-    # Legacy schema v0/v1/v2 databases stay on the legacy runtime and are never
-    # migrated forward here; schema-v4 conversion is an explicit offline step.
+    if args.diagnose:
+        return _run_diagnose(args, version)
+    # Only --sample creates a missing native schema-v4 database.  Viewers treat
+    # it as waiting for the timer's first sample.  Legacy schema v0/v1/v2
+    # databases are never migrated forward here; conversion is an explicit
+    # offline step.
     if version is None or version == V1_SCHEMA_VERSION:
         return _run_v4(args)
-    return _run_v2(args)
+    if args.sample:
+        return _run_v2(args)
+    print("battery-status-tui: read-only viewing requires schema v4; "
+          "convert the legacy database using docs/migration.md", file=sys.stderr)
+    return 1
+
+
+def _run_diagnose(args: argparse.Namespace, version: int | None) -> int:
+    source = BatterySource()
+    try:
+        measurement = source.read(int(time.time()))
+        session = None
+        if version == V1_SCHEMA_VERSION:
+            try:
+                session = V1History(args.database).current_session()
+            except V1HistoryError:
+                pass
+        elif version in (0, 1, 2):
+            try:
+                session = Storage(args.database).current_session()
+            except (sqlite3.Error, OSError):
+                pass
+        print(diagnostic_text(measurement, session=session, database_path=args.database))
+        return 0
+    except SourceUnavailable as error:
+        print(f"battery-status-tui: {error}", file=sys.stderr)
+        return 1
 
 
 def _run_v4(args: argparse.Namespace) -> int:
-    source = BatterySource()
     storage = V1Storage(args.database)
-    profile_resolver = PowerProfileResolver()
-    interval_ms = max(1, round(args.interval * 1_000))
-    try:
-        storage.initialize_writer()
-    except V1StorageError as error:
-        print(f"battery-status-tui: {error}", file=sys.stderr)
-        return 1
-
-    # Seed the poll-spacing guard from the recovered checkpoint so a process
-    # that starts within the same second as the previous run's last poll (a
-    # rapid restart, or ``--once``/``--sample`` immediately before the TUI)
-    # waits for the next second instead of feeding the collector a
-    # non-increasing timestamp.
-    last_poll_ts = _recovered_last_poll_second(storage)
-
-    def poll() -> Measurement:
-        nonlocal last_poll_ts
-        now = int(time.time())
-        if now <= last_poll_ts:
-            # Also covers the interactive projection-boundary wakeup landing in
-            # the same second as the previous poll.
-            time.sleep(max(0.0, last_poll_ts + 1 - time.time()))
+    if args.sample:
+        source = BatterySource()
+        profile_resolver = PowerProfileResolver()
+        interval_ms = max(1, round(args.interval * 1_000))
+        try:
+            storage.initialize_writer()
+            last_poll_ts = _recovered_last_poll_second(storage)
             now = int(time.time())
-        resolved = profile_resolver.resolve()
-        measurement, _result = collect_v1(
-            source, storage, timestamp=now,
-            profile=None if resolved is None else resolved.profile,
-            journal_lookup=journal_intervals,
-            configured_interval_ms=interval_ms,
-        )
-        last_poll_ts = measurement.timestamp
-        return measurement
-
-    try:
-        if args.sample:
-            measurement = poll()
+            if now <= last_poll_ts:
+                time.sleep(max(0.0, last_poll_ts + 1 - time.time()))
+                now = int(time.time())
+            resolved = profile_resolver.resolve()
+            measurement, _result = collect_v1(
+                source, storage, timestamp=now,
+                profile=None if resolved is None else resolved.profile,
+                journal_lookup=journal_intervals,
+                configured_interval_ms=interval_ms,
+            )
             print(f"{measurement.timestamp} {measurement.percentage:.1f}% "
                   f"{measurement.state} {_power_line(measurement)}")
             return 0
-        if args.diagnose:
-            measurement = source.read(int(time.time()))
-            try:
-                session = V1History(storage.path).current_session()
-            except V1HistoryError:
-                session = None
-            print(diagnostic_text(measurement, session=session,
-                                  database_path=storage.path))
+        except V4_RUNTIME_ERRORS as error:
+            print(f"battery-status-tui: {error}", file=sys.stderr)
+            return 1
+
+    if args.once or not sys.stdout.isatty():
+        try:
+            print(_render_v4_view(storage, int(time.time())))
             return 0
-        if args.once or not sys.stdout.isatty():
-            measurement = poll()
-            print(render_v1(storage, current=measurement))
-            return 0
-    except V4_RUNTIME_ERRORS as error:
-        print(f"battery-status-tui: {error}", file=sys.stderr)
-        return 1
+        except (V1HistoryError, V1StorageError, sqlite3.Error) as error:
+            print(f"battery-status-tui: {error}", file=sys.stderr)
+            return 1
 
     running = True
 
@@ -283,35 +315,19 @@ def _run_v4(args: argparse.Namespace) -> int:
 
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
-    monitor = LogindMonitor()
-    monitor.start()
     sys.stdout.write(CSI + "?25l")
     try:
         while running:
             try:
-                measurement = poll()
-                output = render_v1(storage, current=measurement)
-            except V4_RUNTIME_ERRORS as error:
+                output = _render_v4_view(storage, int(time.time()))
+            except (V1HistoryError, V1StorageError, sqlite3.Error) as error:
                 output = f"battery-status-tui: {error}"
             sys.stdout.write(CSI + "2J" + CSI + "H" + output + "\n")
             sys.stdout.flush()
-            shown_profile = profile_resolver.resolve()
             deadline = time.monotonic() + next_refresh_delay(args.interval, time.time())
             while running and time.monotonic() < deadline:
-                monitor.wakeup.wait(min(0.2, deadline - time.monotonic()))
-                resumed = False
-                for sleeping, _event_time in monitor.drain():
-                    if not sleeping:
-                        # Resume: the next poll reconstructs the suspend gap from
-                        # the stored clocks and journal, exactly as proven.
-                        resumed = True
-                if resumed:
-                    profile_resolver.invalidate()
-                    break
-                if profile_resolver.resolve() != shown_profile:
-                    break
+                time.sleep(min(0.2, deadline - time.monotonic()))
     finally:
-        monitor.close()
         sys.stdout.write(RESET + CSI + "?25h")
         sys.stdout.flush()
     return 0
