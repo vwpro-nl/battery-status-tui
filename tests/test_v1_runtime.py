@@ -15,7 +15,7 @@ from battery_status_tui.energy_integrity import (
 from battery_status_tui.v1_collector import V1Collector, V1CollectorError
 from battery_status_tui.v1_hourly import QUALITY_ENERGY_REJECTED
 from battery_status_tui.v1_hourly import HOUR_MS
-from battery_status_tui.v1_runtime import _stabilize_identities
+from battery_status_tui.v1_runtime import _new_sleep_intervals, _stabilize_identities
 from battery_status_tui.v1_storage import MAX_GENERATIONS, V1Storage
 
 
@@ -274,6 +274,39 @@ class V1RuntimeTests(unittest.TestCase):
         self.assertEqual(row["unknown_ms"], 0)
         self.assertEqual(row["discharged_energy_wh"], 0)
         self.assertEqual(row["source_generation"], 2)
+
+    def test_battery_hibernation_across_restart_is_recovered_before_first_poll(self) -> None:
+        previous = measurement(3_600, soc=3, energy=2, boot="old-boot",
+                               monotonic=3_600, boottime=3_600)
+        self.collector.process_poll(previous)
+        current = measurement(14_400, soc=4, state="charging", ac=True, energy=2.1,
+                              boot="new-boot", monotonic=120, boottime=120)
+        proven = SleepInterval(3_638, 14_280, kind="hibernate", source="journal",
+                               boot_id="oldboot")
+        calls = []
+
+        def journal_lookup(since: int):
+            calls.append(since)
+            return (proven,)
+
+        sleeps = _new_sleep_intervals(previous.raw_batteries, current.raw_batteries,
+                                      journal_lookup)
+        self.assertEqual(sleeps, (proven,))
+        self.assertEqual(calls, [3_540])
+        self.collector.process_poll(current, sleeps=sleeps)
+
+        stored = self.rows("sleep_intervals")
+        self.assertEqual(len(stored), 1)
+        self.assertEqual(
+            (stored[0]["started_at_ms"], stored[0]["ended_at_ms"], stored[0]["kind"],
+             stored[0]["source"], stored[0]["pre_soc"], stored[0]["post_soc"]),
+            (3_638_000, 14_280_000, "hibernate", "journal", 3, 4),
+        )
+        rows = {row["hour_start_ms"]: row for row in self.rows("hourly_history")}
+        self.assertEqual(rows[3_600_000]["sleep_ms"], 3_562_000)
+        self.assertEqual(rows[7_200_000]["sleep_ms"], 3_600_000)
+        self.assertEqual(rows[10_800_000]["sleep_ms"], 3_480_000)
+        self.assertEqual(rows[10_800_000]["unknown_ms"], 120_000)
 
     def test_clock_resume_gap_is_recovered_and_persisted_automatically(self) -> None:
         self.collector.process_poll(measurement(3_600, monotonic=100, boottime=100))

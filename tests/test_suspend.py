@@ -22,6 +22,22 @@ class SuspendTests(unittest.TestCase):
         interval = parse_journal(lines)[0]
         self.assertEqual((interval.started_at, interval.ended_at, interval.source), (100, 500, "journal"))
 
+    def test_journal_closes_hibernation_at_next_boot_when_image_is_not_resumed(self):
+        lines = "\n".join(json.dumps(item) for item in (
+            {"MESSAGE": "PM: hibernation: hibernation entry",
+             "__REALTIME_TIMESTAMP": "100000000", "_BOOT_ID": "old-boot"},
+            {"MESSAGE": "Linux version 6.x",
+             "__REALTIME_TIMESTAMP": "500000000", "_BOOT_ID": "new-boot"},
+            {"MESSAGE": "PM: Image not found (code -22)",
+             "__REALTIME_TIMESTAMP": "501000000", "_BOOT_ID": "new-boot"},
+        ))
+        interval = parse_journal(lines)[0]
+        self.assertEqual(
+            (interval.started_at, interval.ended_at, interval.kind,
+             interval.source, interval.boot_id),
+            (100, 500, "hibernate", "journal", "old-boot"),
+        )
+
     def test_prepare_for_sleep_parser_accepts_compact_and_verbose_booleans(self):
         for boolean_line in ("b true", "        BOOLEAN true;"):
             with self.subTest(boolean_line=boolean_line):

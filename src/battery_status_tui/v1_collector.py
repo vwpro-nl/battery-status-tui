@@ -164,7 +164,15 @@ def _recovery_sleeps(recovery: RecoverySelection, current: _PollState,
         return supplied
     previous = _state_from_checkpoint(recovery.snapshot)
     if previous.boot_id != current.boot_id:
-        return supplied
+        return tuple(
+            SleepInterval(
+                item.started_at, item.ended_at, item.kind, item.source, item.boot_id,
+                previous.soc if item.pre_percentage is None else item.pre_percentage,
+                current.soc if item.post_percentage is None else item.post_percentage,
+            ) if item.started_at < current.timestamp_ms // 1_000
+            and item.ended_at > previous.timestamp_ms // 1_000 else item
+            for item in supplied
+        )
     suspended_ns = ((current.boottime_ns - previous.boottime_ns)
                     - (current.monotonic_ns - previous.monotonic_ns))
     if suspended_ns <= WALLCLOCK_TOLERANCE_MS * 1_000_000:

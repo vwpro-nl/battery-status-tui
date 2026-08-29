@@ -70,18 +70,27 @@ def _new_sleep_intervals(previous: tuple[RawBatterySnapshot, ...],
                          current: tuple[RawBatterySnapshot, ...],
                          journal_lookup: JournalLookup | None) -> tuple[SleepInterval, ...]:
     by_identity = {item.identity: item for item in previous}
+    matched = tuple((old, item) for item in current
+                    if (old := by_identity.get(item.identity)) is not None)
     clock_intervals = tuple(
-        interval for item in current
-        if (old := by_identity.get(item.identity)) is not None
-        and (interval := clock_sleep(old, item)) is not None
+        interval for old, item in matched
+        if (interval := clock_sleep(old, item)) is not None
     )
-    if not clock_intervals or journal_lookup is None:
+    cross_boot = tuple((old, item) for old, item in matched if old.boot_id != item.boot_id)
+    if (not clock_intervals and not cross_boot) or journal_lookup is None:
         return clock_intervals
-    since = min(interval.started_at for interval in clock_intervals) - 60
+    since = min(
+        [interval.started_at for interval in clock_intervals]
+        + [old.timestamp for old, _item in cross_boot]
+    ) - 60
     journal = tuple(journal_lookup(since))
     relevant = tuple(item for item in journal if any(
         item.started_at < clock.ended_at and item.ended_at > clock.started_at
         for clock in clock_intervals
+    ) or any(
+        item.started_at < current_item.timestamp and item.ended_at > old.timestamp
+        and (item.boot_id or "").replace("-", "") == old.boot_id.replace("-", "")
+        for old, current_item in cross_boot
     ))
     return relevant or clock_intervals
 

@@ -53,10 +53,19 @@ def parse_journal(lines: str) -> list[SleepInterval]:
         message = str(item.get("MESSAGE", ""))
         timestamp = int(item.get("__REALTIME_TIMESTAMP", 0)) // 1_000_000
         boot_id = item.get("_BOOT_ID")
-        if "PM: suspend entry" in message:
-            kind = "hibernate" if "hibernate" in message.lower() else "suspend"
+        if (pending and boot_id and pending[1] and boot_id != pending[1]
+                and timestamp > pending[0]):
+            intervals.append(SleepInterval(
+                pending[0], timestamp, pending[2], "journal", pending[1]
+            ))
+            pending = None
+        if ("PM: suspend entry" in message
+                or "PM: hibernation: hibernation entry" in message):
+            kind = "hibernate" if "hibernation" in message.lower() else "suspend"
             pending = (timestamp, boot_id, kind)
-        elif "PM: suspend exit" in message and pending and timestamp > pending[0]:
+        elif (("PM: suspend exit" in message
+               or "PM: hibernation: hibernation exit" in message)
+              and pending and timestamp > pending[0]):
             intervals.append(SleepInterval(pending[0], timestamp, pending[2], "journal", pending[1]))
             pending = None
     return intervals
