@@ -36,16 +36,24 @@ only in the legacy schema-v2 runtime and is not applied on schema v4.
 The forecast renderer uses the selected ETA only to set the slope toward the
 relevant boundary (0% or 100%). It never reverses direction.
 
-The forecast is **not** truncated at the moment of predicted empty or full. It
-is drawn across the entire 6-hour forecast window:
+The graphical forecast is **sized to the ETA**: it occupies just enough columns
+to reach the predicted empty/full time and no more, ending flush against the
+right edge. Whatever it does not need is given back to history, so the `NOW`
+marker moves (see [graph.md](graph.md#dynamic-now-column)).
 
-- **Discharging:** SoC follows the slope down to 0%, then **holds at 0% for the
-  rest of the window**, rendered as a bottom Braille dot in deep red `#550A14`.
-  This makes "the battery is predicted to be flat for the next several hours"
-  visually distinct from "no forecast".
-- **Charging:** SoC follows the slope up to 100%, then plateaus at a full column
-  for the rest of the window.
-- **Already full on AC:** a flat 100% line across the window.
+- **Discharging:** SoC follows the slope down toward 0% at the predicted empty
+  time. If it reaches 0% before the right edge it holds at 0%, drawn as a bottom
+  Braille dot in deep red `#550A14`.
+- **Charging:** SoC follows the slope up toward a full column at the predicted
+  full time.
+- **No usable ETA, or already full on AC:** no forecast is drawn and `NOW` sits
+  at the far-right column, giving the whole width to history.
+
+`NOW` never moves left of the graph midpoint, so at least half the width is
+always history. A forecast whose horizon is longer than that half is **clipped
+at the right edge** — the drawn curve simply stops mid-slope. It is never
+compressed or rescaled to fit, and the textual remaining time and target clock
+time stay complete and authoritative regardless of the clip.
 
 See [graph.md](graph.md#forecast-behavior) for the rendering details.
 
