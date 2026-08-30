@@ -380,12 +380,15 @@ class V1RuntimeTests(unittest.TestCase):
         self.assertGreater(first[3_600_000][0], 0)
         self.assertGreater(first[3_600_000][2], before[3_600_000][1])
 
-    def test_recent_series_is_bounded_to_eight_hours(self) -> None:
-        for index in range(11):
-            self.collector.process_poll(measurement(3_600 + index * 3_600))
+    def test_recent_series_is_bounded_to_the_retention_window(self) -> None:
+        for index in range(16):
+            self.collector.process_poll(measurement(3_600 + index * 3_600))  # one poll per hour
         points = decode_recent_series(self.storage.recover().snapshot.recent_series)
-        self.assertLessEqual(points[-1].timestamp_ms - points[0].timestamp_ms, MAX_WINDOW_MS)
-        self.assertEqual(len(points), 9)
+        span = points[-1].timestamp_ms - points[0].timestamp_ms
+        self.assertLessEqual(span, MAX_WINDOW_MS)
+        self.assertEqual(len(points), 13)  # older hourly points fall outside the 12h20m window
+        self.assertGreaterEqual(points[0].timestamp_ms,
+                                points[-1].timestamp_ms - MAX_WINDOW_MS)
 
     def test_source_generation_is_audit_not_checkpoint_fk(self) -> None:
         self.collector.process_poll(measurement(3_590))

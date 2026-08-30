@@ -19,6 +19,7 @@ from .energy_integrity import (
     plausible_power,
 )
 from .recent_series import (
+    MAX_WINDOW_MS,
     POWER_CONFIDENCE_SHIFT,
     POWER_METHOD_SHIFT,
     BatteryState,
@@ -676,7 +677,7 @@ def _recent_flags(sample: AggregateSample, *, broken: bool) -> int:
 def _seed_recent_series(samples: list[AggregateSample], sleep: list[tuple[int, int]],
                         battery_sets: dict[int, str]) -> bytes:
     latest = samples[-1].timestamp_ms
-    selected = [item for item in samples if item.timestamp_ms >= latest - 8 * 3_600_000][-480:]
+    selected = [item for item in samples if item.timestamp_ms >= latest - MAX_WINDOW_MS]
     points = []
     previous = None
     for item in selected:

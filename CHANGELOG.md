@@ -4,6 +4,62 @@ All notable changes to this project are documented here. The format is loosely
 based on [Keep a Changelog](https://keepachangelog.com/). This project follows
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Changed
+
+- The graph viewport is now dynamic. The `NOW` marker is no longer fixed at the
+  centre: the forecast to its right is sized to reach the predicted full/empty
+  time and no further, and every remaining column is given to history on the
+  left. A short ETA moves `NOW` toward the right edge and reveals more history;
+  with no ETA `NOW` sits at the right edge. The axis and the title arrow follow
+  the marker, and history and forecast share one time-to-screen mapping. `NOW`
+  never moves left of the graph midpoint, so at least half the width always
+  shows history; a forecast longer than the right half is drawn up to the right
+  edge (stopping mid-slope) while the text label keeps the full ETA.
+- The discharge forecast now runs down to 0% at the predicted empty time and
+  the charge forecast up to a full column at the predicted full time, instead of
+  holding a flat plateau across a fixed 6-hour window. A battery already full on
+  AC draws no forecast.
+- The active power profile is shown as an emoji face — 🥵 performance, 😎
+  balanced, 😴 power-saver — instead of the spelled-out name in parentheses. The
+  title layout measures terminal-cell width, so the two-cell face does not
+  disturb the SoC, wattage, or NOW-arrow columns. A missing or unrecognized
+  profile shows no face.
+- Finalized hourly history that missed a poll or two (still far below the
+  unknown-gap threshold) now contributes its endpoint samples to the graph, so
+  the wider dynamic viewport no longer shows a blank band between the hourly
+  aggregates and the sub-hour history. Hours with real sleep or a wide unknown
+  span are unchanged.
+- The checkpoint's compact `recent_series` now retains 12 hours 20 minutes of
+  sub-hour points (was 8 hours), matching the widest history the dynamic graph
+  can draw plus one column of clock-alignment slack, so the whole visible
+  history is backed by real measurements. `hourly_history` remains the permanent
+  canonical record; no persistent sub-hour layer is added. Applies to samples
+  collected from now on.
+
+### Added
+
+- `python -m battery_status_tui.simulate` — a dashboard-simulation facility for
+  visual/manual regression testing. It drives the real renderer and estimator
+  with in-memory model objects, shows a `SIMULATION` heading, and never starts a
+  collector or timer. The deterministic synthetic `sleep-drop` scenario renders
+  measured history → a proven sleep SoC drop → measured resume through the
+  locked sleep-Braille path and opens no database. `--simulate
+  <duration>[:sleep|:nodata][=<soc>] ... [ac[=<watts>w]|dc[=<watts>w]]` appends
+  a sequential hypothetical timeline to the *genuine* live graph — real history,
+  SoC, colour, sleeps, session, identity, health and profile kept verbatim;
+  absolute / relative-point SoC; `:sleep` gets the locked colour-gradient
+  Braille reconstruction while `:nodata` draws a straight-line Braille
+  connection between its known endpoints in neutral light gray (a genuine
+  history gap with no reliable endpoint still stays blank); the fictitious
+  final state and forecast come from the production estimator. The total
+  timeline is
+  validated against `graph.MAX_SPAN_SECONDS`. The production database is read
+  once, strictly read-only (`mode=ro`, `PRAGMA query_only=ON`, never created,
+  no writer/migration path), leaving the live collector untouched. See the
+  README "Simulating the dashboard" section.
+
 ## 1.0.0 — unreleased
 
 First public release.

@@ -79,9 +79,14 @@ class V1HistoryTests(unittest.TestCase):
         lines = output.splitlines()
         self.assertEqual(len(lines), 5)
         self.assertIn("BATTERY", lines[0])
-        self.assertIn("SoC 60% ↓  10.0 W (balanced)", lines[0])
+        self.assertIn("SoC 60% ↓  10.0 W 😎", lines[0])  # balanced -> emoji face
         self.assertTrue(lines[4].endswith("SoH 62.5%"))
-        self.assertEqual(lines[1].index("│"), GRAPH_OFFSET + NOW_INDEX)
+        # NOW separates solid history on the left from braille forecast on the right
+        graph_top = lines[1][GRAPH_OFFSET:GRAPH_OFFSET + GRAPH_WIDTH]
+        marker = graph_top.index("│")
+        self.assertNotIn("│", graph_top[marker + 1:])
+        self.assertTrue(all(c == " " or 0x2581 <= ord(c) <= 0x2588 for c in graph_top[:marker]))
+        self.assertTrue(all(c == " " or 0x2800 <= ord(c) <= 0x28FF for c in graph_top[marker + 1:]))
 
     def test_open_hour_comes_from_checkpoint_and_recent_series(self) -> None:
         now = 10 * 3600
@@ -156,7 +161,7 @@ class V1HistoryTests(unittest.TestCase):
         self.assertEqual(view.sleeps, (sleep,))
         top, bottom = chart_rows(view.current, view.history, None, now, view.sleeps)
         self.assertTrue(any(0x2800 <= ord(char) <= 0x28FF for char in top + bottom))
-        self.assertEqual((top[NOW_INDEX], bottom[NOW_INDEX]), ("│", "│"))
+        self.assertEqual((top[GRAPH_WIDTH - 1], bottom[GRAPH_WIDTH - 1]), ("│", "│"))
         self.assertEqual([item.timestamp for item in view.trend_history], [start + 600])
 
     def test_partial_hourly_only_history_does_not_invent_subhour_points(self) -> None:
@@ -165,6 +170,33 @@ class V1HistoryTests(unittest.TestCase):
         self.insert_hour(8 * HOUR_MS, observed_ms=30 * 60 * 1000)
         view = V1History(self.path).load(8 * 3600, now=now)
         self.assertFalse(any(item.source == "hourly-history" for item in view.history))
+
+    def test_near_complete_hour_renders_in_the_wide_dynamic_viewport(self) -> None:
+        # A finalized hour that missed a couple of polls still holds a continuous
+        # SoC trajectory. In a no-forecast dynamic viewport (NOW at the right
+        # edge, up to 12 h of history) its low-SoC endpoints must reach the
+        # renderer instead of vanishing in the seam between the hourly layer and
+        # the 8 h recent_series. A barely-observed hour still stays blank.
+        from battery_status_tui.graph import _chart_rows_and_percentages, now_column
+
+        now = 10 * 3600
+        self.collector.process_poll(sample(now, soc=100, state="full", ac=True))
+        self.insert_hour(2 * HOUR_MS, soc_start=6, soc_end=3,
+                         observed_ms=HOUR_MS - 2 * 60 * 1000)          # 58 min observed
+        self.insert_hour(3 * HOUR_MS, soc_start=3, soc_end=4,
+                         observed_ms=HOUR_MS - 12 * 60 * 1000)         # 48 min observed
+        view = V1History(self.path).load(now - 12 * 3600, now=now)
+
+        by_source = {m.source for m in view.history}
+        self.assertIn("hourly-history", by_source)
+        near_complete = sorted(round(m.percentage) for m in view.history
+                               if m.source == "hourly-history")
+        self.assertEqual(near_complete, [3, 6])            # only the 58-min hour, not the 48-min one
+
+        marker = now_column(view.current, None)
+        self.assertEqual(marker, GRAPH_WIDTH - 1)          # no forecast -> NOW at the right edge
+        _, _, pct = _chart_rows_and_percentages(view.current, view.history, None, now, view.sleeps)
+        self.assertTrue(any(p is not None and p <= 6 for p in pct[:marker]))  # low-SoC hour on screen
 
     def test_health_profile_and_open_closed_sessions_come_from_v4(self) -> None:
         now = 10 * 3600

@@ -53,18 +53,30 @@ class RecentSeriesTests(unittest.TestCase):
     def test_empty_series_round_trip(self):
         self.assertEqual(decode_recent_series(encode_recent_series(())), ())
 
-    def test_480_one_minute_points_fit_inside_eight_hours(self):
-        points = tuple(point(1_000_000 + index * 60_000) for index in range(480))
+    def test_dense_one_minute_points_fill_the_retention_window(self):
+        count = MAX_WINDOW_MS // 60_000  # one-minute polls that fill the whole window
+        points = tuple(point(1_000_000 + index * 60_000) for index in range(count))
         decoded = decode_recent_series(encode_recent_series(points))
-        self.assertEqual(len(decoded), 480)
+        self.assertEqual(len(decoded), count)
         self.assertLessEqual(decoded[-1].timestamp_ms - decoded[0].timestamp_ms,
                              MAX_WINDOW_MS)
 
-    def test_exact_eight_hour_boundary_is_allowed_but_not_one_ms_more(self):
+    def test_exact_retention_window_boundary_is_allowed_but_not_one_ms_more(self):
         encode_recent_series((point(1_000_000), point(1_000_000 + MAX_WINDOW_MS)))
         with self.assertRaises(RecentSeriesError):
             encode_recent_series((point(1_000_000),
                                   point(1_000_000 + MAX_WINDOW_MS + 1)))
+
+    def test_retention_window_backs_the_widest_graph_history_span(self):
+        # The widest dynamic-NOW viewport draws MAX_SPAN_SECONDS of history;
+        # because 20-minute columns snap to absolute clock boundaries its
+        # leftmost column can begin up to one COLUMN_SECONDS before
+        # now - MAX_SPAN_SECONDS. recent_series must retain at least that far
+        # back so every visible history column is backed by real samples.
+        from battery_status_tui.graph import COLUMN_SECONDS, MAX_SPAN_SECONDS
+
+        self.assertGreaterEqual(MAX_WINDOW_MS,
+                                (MAX_SPAN_SECONDS + COLUMN_SECONDS) * 1_000)
 
     def test_encoder_rejects_non_finite_energy_and_invalid_enums(self):
         for value in (math.nan, math.inf, -math.inf):

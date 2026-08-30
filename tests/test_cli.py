@@ -6,7 +6,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from battery_status_tui.cli import collect, current_estimate, diagnostic_text, next_refresh_delay, parser
-from battery_status_tui.graph import NOW_INDEX, _chart_rows_and_percentages, _sleep_columns
+from battery_status_tui.graph import (
+    GRAPH_WIDTH, _chart_rows_and_percentages, _sleep_columns, now_column,
+)
 from battery_status_tui.models import Measurement, RawBatterySnapshot, SleepInterval
 from battery_status_tui.power import PowerResolver
 from battery_status_tui.storage import Storage
@@ -59,17 +61,20 @@ class CliTests(unittest.TestCase):
                 current = collect(self.Source(post), storage, post.timestamp)
             intervals = storage.sleep_intervals_since(post.timestamp - 6 * 3600)
             history = storage.samples_since(post.timestamp - 6 * 3600)
+            marker = now_column(current, None)
             top, bottom, _ = _chart_rows_and_percentages(current, history, None,
                                                          post.timestamp, intervals)
 
         self.assertEqual(len(intervals), 1)
         self.assertEqual((intervals[0].pre_percentage, intervals[0].post_percentage), (67, 67))
-        columns = _sleep_columns(intervals[0], post.timestamp)
+        columns = _sleep_columns(intervals[0], post.timestamp, marker)
         self.assertEqual(len(columns), 14)
+        self.assertTrue(all(column < marker for column in columns))
         self.assertTrue(all(0x2800 <= ord(character) <= 0x28ff
                             for column in columns for character in (top[column], bottom[column])
                             if character != " "))
-        self.assertEqual((top[NOW_INDEX], bottom[NOW_INDEX]), ("│", "│"))
+        self.assertEqual(marker, GRAPH_WIDTH - 1)  # no forecast -> NOW at the right edge
+        self.assertEqual((top[marker], bottom[marker]), ("│", "│"))
         self.assertIsNone(current.power_w)
 
     def test_clock_resume_handles_short_sleep_and_ignores_no_gap_or_replacement(self):

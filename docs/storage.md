@@ -31,9 +31,10 @@ user-content data. Nothing is uploaded.
 
 At one sample per minute, collection has negligible CPU and storage cost. Only
 *changes* are stored as events; per-hour aggregates are one row each; the
-rotating checkpoint keeps at most three generations plus up to eight hours of
-compact sub-hour points. The supplied systemd timer starts a short-lived
-process each minute rather than keeping a daemon resident.
+rotating checkpoint keeps at most three generations plus up to 12 hours 20
+minutes of compact sub-hour points (enough to back the widest history the graph
+can show). The supplied systemd timer starts a short-lived process each minute
+rather than keeping a daemon resident.
 
 ## One writer
 

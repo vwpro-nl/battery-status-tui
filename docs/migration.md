@@ -39,7 +39,7 @@ python3 tools/convert_v2_to_v1.py \
 The converter reads the v2 database read-only and builds a new schema-v4
 database: batteries, the `state_events` log, `battery_health` events, sessions,
 `sleep_intervals`, every finalized `hourly_history` hour, and a seed checkpoint
-(generation 1) carrying up to 8 hours / 480 points of `recent_series`. It sets
+(generation 1) carrying up to 12 hours 20 minutes of `recent_series`. It sets
 `metadata.converted_from_schema = '2'` and checks `quick_check`,
 `foreign_key_check`, and the complete-hour invariant before committing.
 

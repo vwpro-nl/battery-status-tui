@@ -13,7 +13,7 @@ from pathlib import Path
 
 from . import __version__
 from .estimate import estimate_remaining, smooth_seconds
-from .graph import COLUMN_SECONDS, CSI, RESET, render_dashboard
+from .graph import COLUMN_SECONDS, CSI, MAX_SPAN_SECONDS, RESET, render_dashboard
 from .models import Estimate, Measurement, Session
 from .models import SleepInterval
 from .schema import V1_SCHEMA_VERSION
@@ -31,6 +31,7 @@ UNICODE_PROBE = """SOLID  : █ ▇ ▆ ▅ ▄ ▃ ▂ ▁
 BRAILLE: ⠀ ⠁ ⠂ ⠄ ⡀ ⢀ ⠒ ⠤ ⠦ ⠴
 JOIN   : ███▇▆▅│⠴⠦⠤⠒⠂⠁
 HEIGHT : ⠀ ⡀ ⣀ ⣄ ⣤ ⣦ ⣶ ⣿
+PROFILE: 🥵 😎 😴
 AXIS   : ┬─────┬─────┬─────┬─────┬"""
 
 def next_refresh_delay(interval: float, wall_now: float) -> float:
@@ -92,9 +93,9 @@ def render_once(source: BatterySource, storage: Storage, now: int | None = None,
     current = collect(source, storage, sample_timestamp)
     render_timestamp = int(time.time()) if now is None else now
     session = storage.current_session()
-    history = storage.samples_since(render_timestamp - 6 * 3600)
+    history = storage.samples_since(render_timestamp - MAX_SPAN_SECONDS)
     estimate = current_estimate(storage, current, sample_timestamp)
-    sleeps = storage.sleep_intervals_since(render_timestamp - 6 * 3600)
+    sleeps = storage.sleep_intervals_since(render_timestamp - MAX_SPAN_SECONDS)
     health = health_resolver.resolve(current.raw_batteries) if health_resolver else None
     profile = profile_resolver.resolve() if profile_resolver else None
     return render_dashboard(current, history, session, estimate, render_timestamp, sleeps,

@@ -7,7 +7,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import replace
 
 from .estimate import estimate_remaining
-from .graph import HISTORY_SECONDS, render_dashboard
+from .graph import MAX_SPAN_SECONDS, render_dashboard
 from .models import Measurement, RawBatterySnapshot, SleepInterval
 from .sources import BatterySource, aggregate
 from .suspend import clock_sleep, journal_intervals
@@ -129,7 +129,7 @@ def collect_v1(source: BatterySource, storage: V1Storage, *, timestamp: int | No
 
 def read_v1_view(storage: V1Storage, *, now: int | None = None) -> V1HistorySnapshot:
     effective_now = int(time.time()) if now is None else now
-    return V1History(storage.path).load(effective_now - HISTORY_SECONDS, now=effective_now)
+    return V1History(storage.path).load(effective_now - MAX_SPAN_SECONDS, now=effective_now)
 
 
 def render_v1(storage: V1Storage, *, now: int | None = None,

@@ -10,23 +10,43 @@ produced by `graph.render_dashboard`.
 |---|---|---|
 | Total columns | 37 | `GRAPH_WIDTH` (`TIME_COLUMNS + 1`) |
 | Column width in time | 20 minutes | `COLUMN_SECONDS` |
-| History region | 18 columns = 6 hours | `HISTORY_SECONDS` |
-| NOW column | index 18 | `NOW_INDEX` |
-| Forecast region | 18 columns = 6 hours | `FORECAST_SECONDS` |
+| Maximum span | 12 hours | `MAX_SPAN_SECONDS` (`TIME_COLUMNS * COLUMN_SECONDS`) |
+| NOW column | dynamic, never left of the midpoint | `now_column()` |
+| Graph midpoint / minimum history | 18 columns (`TIME_COLUMNS // 2`) | `NOW_INDEX` |
 | Axis ticks | every 1 hour | `TICK_SECONDS` |
 | Left label gutter | 6 characters | `GRAPH_OFFSET` |
 
-So the graph always spans a fixed **12 hours: 6 hours of history, the NOW
-column, 6 hours of forecast**. Columns are aligned to absolute wall-clock
-20-minute boundaries, not to "20 minutes ago" — the grid is stable between
-refreshes and only shifts when a real 20-minute boundary passes.
+The graph is always 37 columns of 20 minutes each — at most a **12-hour**
+window. Columns are aligned to absolute wall-clock 20-minute boundaries, not to
+"20 minutes ago" — the grid is stable between refreshes and only shifts when a
+real 20-minute boundary passes.
 
-### Fixed NOW column
+### Dynamic NOW column
 
-The NOW column (`│` in both graph rows) is always at index 18 and always
-represents the current time. History is drawn to its left, forecast to its
-right. The title-line direction arrow sits directly above it. History never
-crosses to the right of NOW; forecast never crosses to the left.
+The NOW column (`│` in both graph rows) is **not fixed**. Its position is set by
+the forecast horizon (`now_column()`):
+
+* The forecast to the **right** of NOW is only as wide as it needs to be to
+  reach the predicted `full` (charging) or `empty` (discharging) time —
+  `ceil(eta / 20min)` columns, flush against the right edge. No unused future
+  space is reserved beyond the ETA.
+* Everything to the **left** of NOW is history. Whatever the forecast does not
+  need is available to history, so a short ETA pushes NOW right and reveals more
+  past; a long ETA pulls NOW left.
+* NOW **never moves left of the graph midpoint** (`NOW_INDEX`,
+  `TIME_COLUMNS // 2` = 18): at least half the width always stays available to
+  history. A forecast longer than the right half (`GRAPH_WIDTH - 1 - NOW_INDEX`
+  columns ≈ 6 h) is drawn only up to the right edge — the visible curve simply
+  stops mid-slope. It is **not** compressed or rescaled to fit; the exact ETA
+  and predicted clock time stay complete and authoritative in the right-hand
+  label.
+* When there is no meaningful forecast (battery full/stable, or no ETA yet), NOW
+  sits at the far right edge and the whole width shows history.
+
+History is always drawn to the left of NOW and forecast always to the right; the
+title-line direction arrow sits directly above the NOW column and moves with it.
+The axis ticks and labels follow the visible range, so history and forecast
+share one time-to-screen mapping.
 
 ### Columns and sub-columns
 
@@ -44,7 +64,7 @@ column.
 | Observed history near empty | at least `▁`, using the actual SoC color | low battery was measured — **not** a gap |
 | Sleep / hibernate | Braille, gradient-colored | a proven suspend/hibernate span; SoC interpolated between the pre- and post-sleep readings |
 | Forecast | Braille, gradient-colored | projected SoC to the right of NOW |
-| Unknown | blank (space) | the collector was not running, or continuity broke with no sleep evidence |
+| Unknown | blank (space) | the collector was not running, continuity broke with no sleep evidence, or the window reaches back before our earliest sample |
 
 **The general rule: known data is always visible; a blank cell means unknown /
 no reliable data.** Concretely:
@@ -54,7 +74,10 @@ no reliable data.** Concretely:
 - Valid sleep/hibernate Braille at 0% keeps one bottom Braille dot per
   sub-column.
 - Valid forecast Braille at 0% keeps one bottom Braille dot per sub-column.
-- An unknown span stays blank.
+- An unknown span stays blank — whether it is a gap inside the recorded range or
+  the stretch on the far left older than our earliest sample. Nothing is
+  interpolated or extrapolated to fill it; a blank area is preferable to an
+  invented line.
 
 Above the minimum block, solid history retains its normal 16-level
 quantization. Braille rows retain their separate 8-level geometry.
@@ -77,17 +100,20 @@ colored (and is blank anyway).
 
 ## Forecast behavior
 
-The forecast is drawn when there is a usable ETA for the current session, or
-when the battery is already full on AC.
+The forecast is drawn when there is a usable ETA for the current charging or
+discharging session. Its width is the columns needed to reach the ETA, capped at
+the right half of the graph (see [Dynamic NOW column](#dynamic-now-column)); it
+ends at the right edge. When the ETA fits, the last column lands on the
+predicted time; when it is longer than the right half, the drawn curve stops
+mid-slope at the edge and the right-hand text label still shows the full ETA.
 
-- **Discharging:** SoC is projected toward 0% along the estimated slope. When it
-  reaches 0% it **stays at 0% for the rest of the 6-hour forecast window**,
-  drawn as a bottom Braille dot in deep red `#550A14`. The forecast is not
-  truncated at the moment of predicted empty, and it is not artificially bent
-  back up.
-- **Charging:** SoC is projected toward 100%. When it reaches 100% it plateaus
-  at a full column for the rest of the window.
-- **Full on AC:** a flat 100% line across the whole forecast window.
+- **Discharging:** SoC is projected toward 0% along the estimated slope. If the
+  ramp reaches 0% before the edge it holds at 0%, drawn as a bottom Braille dot
+  in deep red `#550A14`. The forecast is not artificially bent back up.
+- **Charging:** SoC is projected toward 100% along the estimated slope, reaching
+  a full column at the predicted full time when it fits within the right half.
+- **No ETA / full on AC:** no forecast is drawn; NOW sits at the right edge and
+  the width is given to history.
 
 The forecast never reverses direction.
 
@@ -110,17 +136,25 @@ so shaping can never make known data vanish.
 ## Title line, labels, and readouts
 
 ```
-BATTERY         SoC 72% ↓  12.4 W (balanced)
-0h48  ▇▇▆▆▆▆▆▅▅▅▅▅▅▄▄▄▄▄│⡀                  3h10 ~16:10
-start ██████████████████│⣿⣿⣶⣶⣤⣄⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀ empty
-      ┬──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬
-      07 08 09 10 11 12 13 14 15 16 17 18     SoH 94.3%
+BATTERY                 SoC 72% ↓  12.4 W 😎
+0h48             ▁▂▂▂▂▂▂▂▃▃▃▃▃▃▃│⣀          3h10 ~18:20
+start            ███████████████│⣿⣿⣷⣶⣦⣤⣀⣀⣀⣀ empty
+      ──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬─
+        07 08 09 10 11 12 13 14 15 16 17 18   SoH 94.3%
 ```
 
-- **Title:** `BATTERY`, then `SoC N%`, then the direction arrow (`↑` charging,
+Here the ETA needs ten columns of forecast, so `NOW` sits ten from the right.
+Records only reach back about five hours, so the columns further left than that
+stay blank — nothing is invented to fill them.
+
+- **Title:** `BATTERY` (`render_dashboard(heading=…)`, `SIMULATION` for the
+  `simulate` facility), then `SoC N%`, then the direction arrow (`↑` charging,
   `↓` discharging, `·` idle) above NOW, then power. Power is `-- W` when
   unavailable, `X.X W` for a direct reading, `~X.X W` for a time-derived
-  estimate. A power profile, when known, follows in parentheses.
+  estimate. A power profile, when known, follows as an emoji face:
+  🥵 performance, 😎 balanced, 😴 power-saver (`graph.POWER_PROFILE_FACES`).
+  The face is one code point but two terminal cells wide, which the title
+  layout accounts for; a missing or unrecognized profile shows no face.
 - **Left of the graph rows:** time since the current session started
   (`format_duration`), with the label `start` under it. Blank when no session
   is open.
@@ -134,6 +168,7 @@ start ██████████████████│⣿⣿⣶⣶⣤�
 
 ## `--unicode-probe`
 
-`battery-status-tui --unicode-probe` prints the solid, Braille, joining, and
-axis glyphs the renderer uses, so you can check your terminal font renders them
+`battery-status-tui --unicode-probe` prints the solid, Braille, joining,
+power-profile, and axis glyphs the renderer uses, so you can check your terminal
+font renders them
 before relying on the graph.

@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import re
 import statistics
+import unicodedata
 from collections import defaultdict
 from collections.abc import Sequence
 
@@ -18,6 +19,22 @@ CYAN = CSI + "38;5;81m"
 YELLOW = CSI + "38;5;221m"
 MUTED = CSI + "38;5;244m"
 DIM = CSI + "2m"
+# Neutral light gray for a reconstructed trajectory whose endpoints are known
+# but whose path between them is unreliable (simulator ``:nodata`` blocks).
+UNKNOWN_GRAY = CSI + "38;5;238m"
+
+
+class _UnknownTrajectory:
+    """SoC-column sentinel: the endpoints are known, the path is not.
+
+    Distinct object so :func:`_style_battery` colours the cell neutral gray
+    instead of running it through the SoC gradient.
+    """
+
+    __slots__ = ()
+
+
+UNKNOWN_TRAJECTORY = _UnknownTrajectory()
 
 BATTERY_COLOR_STOPS = (
     (0.0, (85, 10, 20)),
@@ -30,20 +47,45 @@ BATTERY_COLOR_STOPS = (
 TIME_COLUMNS = 36
 COLUMN_SECONDS = 20 * 60
 GRAPH_WIDTH = TIME_COLUMNS + 1
-NOW_INDEX = TIME_COLUMNS // 2
+NOW_INDEX = TIME_COLUMNS // 2  # graph midpoint; the live NOW column is dynamic but never left of here
 HISTORY_SECONDS = 6 * 3600
-FORECAST_SECONDS = 6 * 3600
+MAX_SPAN_SECONDS = TIME_COLUMNS * COLUMN_SECONDS
 TICK_SECONDS = 3600
 GRAPH_OFFSET = 6
 MIN_EARLY_SLOPE = 0.25
 BLOCKS = " ▁▂▃▄▅▆▇█"
+
+# One face per power profile. These are emoji and render two terminal cells
+# wide; the title layout accounts for that via ``display_width``. Keep this the
+# single place the mapping is defined.
+POWER_PROFILE_FACES = {
+    "performance": "🥵",
+    "balanced": "😎",
+    "power-saver": "😴",
+}
 BRAILLE_LEFT_BOTTOM_UP = (0x40, 0x04, 0x02, 0x01)
 BRAILLE_RIGHT_BOTTOM_UP = (0x80, 0x20, 0x10, 0x08)
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
-def visible_len(text: str) -> int:
-    return len(ANSI_RE.sub("", text))
+def _char_width(character: str) -> int:
+    """Terminal cells one character occupies: 0 for a combining mark, 2 for a
+    wide/fullwidth glyph (CJK, emoji), 1 otherwise."""
+    if unicodedata.combining(character):
+        return 0
+    return 2 if unicodedata.east_asian_width(character) in ("W", "F") else 1
+
+
+def display_width(text: str) -> int:
+    """Width of ``text`` in terminal cells, ignoring ANSI colour escapes.
+
+    ``len()`` is not a safe proxy: an emoji is one code point but two cells.
+    """
+    return sum(_char_width(character) for character in ANSI_RE.sub("", text))
+
+
+# Backwards-compatible name; the visible width is measured in terminal cells.
+visible_len = display_width
 
 
 def _put(canvas: list[str], position: int, text: str) -> None:
@@ -126,21 +168,48 @@ def _sleep_residual_transfer(continuous_heights: Sequence[float], raster: Sequen
 def _braille_subcolumn_times(bucket_start: float, bucket_duration: int) -> tuple[float, float]:
     return bucket_start + bucket_duration / 4, bucket_start + bucket_duration * 3 / 4
 
-def project_column(timestamp: int, now: int) -> int:
-    """Project an exact timestamp onto the shared 20-minute display grid."""
-    return NOW_INDEX + timestamp // COLUMN_SECONDS - now // COLUMN_SECONDS
+def project_column(timestamp: int, now: int, now_col: int = NOW_INDEX) -> int:
+    """Project an exact timestamp onto the shared 20-minute display grid.
+
+    ``now_col`` is the screen column that represents the current time; history
+    lies to its left and forecast to its right.
+    """
+    return now_col + timestamp // COLUMN_SECONDS - now // COLUMN_SECONDS
 
 
-def column_timestamp(column: int, now: int) -> int:
+def column_timestamp(column: int, now: int, now_col: int = NOW_INDEX) -> int:
     """Return the exact boundary represented by a display column."""
-    return (now // COLUMN_SECONDS + column - NOW_INDEX) * COLUMN_SECONDS
+    return (now // COLUMN_SECONDS + column - now_col) * COLUMN_SECONDS
 
 
-def _history_column(timestamp: int, now: int) -> int | None:
+def _forecast_span_columns(current: Measurement, estimate: Estimate | None) -> int:
+    """Columns of forecast to draw: enough to reach the predicted full/empty
+    time, but never more than half the graph (`GRAPH_WIDTH - 1 - NOW_INDEX`) so
+    NOW cannot cross the midpoint. A longer horizon is clipped by the viewport;
+    the textual ETA stays complete and authoritative. Zero when there is no
+    usable prediction."""
+    if (estimate is None or estimate.seconds <= 0
+            or current.session_kind not in {"charging", "discharging"}):
+        return 0
+    columns = -(-estimate.seconds // COLUMN_SECONDS)  # ceil to the next whole column
+    return max(1, min(GRAPH_WIDTH - 1 - NOW_INDEX, columns))
+
+
+def now_column(current: Measurement, estimate: Estimate | None) -> int:
+    """Screen column of the live NOW marker.
+
+    With no forecast the marker sits at the far-right edge. A forecast slides it
+    left only as far as the horizon needs, and never past the graph midpoint
+    (`NOW_INDEX`) — at least half the width always stays available to history.
+    """
+    return GRAPH_WIDTH - 1 - _forecast_span_columns(current, estimate)
+
+
+def _history_column(timestamp: int, now: int, now_col: int = NOW_INDEX) -> int | None:
     latest_closed_bucket = now // COLUMN_SECONDS - 1
     sample_bucket = timestamp // COLUMN_SECONDS
-    column = NOW_INDEX - 1 - (latest_closed_bucket - sample_bucket)
-    return column if sample_bucket <= latest_closed_bucket and 0 <= column < NOW_INDEX else None
+    column = now_col - 1 - (latest_closed_bucket - sample_bucket)
+    return column if sample_bucket <= latest_closed_bucket and 0 <= column < now_col else None
 
 
 def _sleep_fraction(interval: SleepInterval, bucket_start: int, bucket_duration: int) -> float:
@@ -149,7 +218,7 @@ def _sleep_fraction(interval: SleepInterval, bucket_start: int, bucket_duration:
     return overlap / bucket_duration
 
 
-def _sleep_columns(interval: SleepInterval, now: int) -> list[int]:
+def _sleep_columns(interval: SleepInterval, now: int, now_col: int = NOW_INDEX) -> list[int]:
     if interval.ended_at <= interval.started_at:
         return []
     first_bucket = interval.started_at // COLUMN_SECONDS
@@ -157,8 +226,8 @@ def _sleep_columns(interval: SleepInterval, now: int) -> list[int]:
     columns = []
     for bucket in range(first_bucket, last_bucket + 1):
         bucket_start = bucket * COLUMN_SECONDS
-        column = project_column(bucket_start, now)
-        if 0 <= column < NOW_INDEX and _sleep_fraction(interval, bucket_start, COLUMN_SECONDS) > 0.25:
+        column = project_column(bucket_start, now, now_col)
+        if 0 <= column < now_col and _sleep_fraction(interval, bucket_start, COLUMN_SECONDS) > 0.25:
             columns.append(column)
     return columns
 
@@ -239,6 +308,15 @@ def _smooth_sleep_edges(
     return raster
 
 
+def profile_face(profile: str | None) -> str | None:
+    """The emoji face for a power profile, or ``None`` when there is nothing to
+    show. A missing or unrecognised profile shows no face rather than a made-up
+    one."""
+    if not profile:
+        return None
+    return POWER_PROFILE_FACES.get(profile)
+
+
 def _battery_color(percentage: float) -> str:
     value = max(0.0, min(100.0, percentage))
     for (lower_value, lower_rgb), (upper_value, upper_rgb) in zip(
@@ -260,14 +338,17 @@ def _chart_rows_and_percentages(
     estimate: Estimate | None,
     now: int,
     sleep_intervals: Sequence[SleepInterval] = (),
-) -> tuple[str, str, list[float | None]]:
+    unknown_intervals: Sequence[SleepInterval] = (),
+) -> tuple[str, str, list]:
+    marker_column = now_column(current, estimate)
+    left_edge = column_timestamp(0, now, marker_column)
     top = [" "] * GRAPH_WIDTH
     bottom = [" "] * GRAPH_WIDTH
     percentages_by_column: list[float | None] = [None] * GRAPH_WIDTH
     buckets: dict[int, list[float]] = defaultdict(list)
     for sample in history:
-        if now - HISTORY_SECONDS <= sample.timestamp < now:
-            column = _history_column(sample.timestamp, now)
+        if left_edge <= sample.timestamp < now:
+            column = _history_column(sample.timestamp, now, marker_column)
             if column is not None:
                 buckets[column].append(sample.percentage)
     for column, bucket_percentages in buckets.items():
@@ -276,9 +357,9 @@ def _chart_rows_and_percentages(
         percentages_by_column[column] = percentage
 
     for interval in sleep_intervals:
-        if interval.ended_at <= now - HISTORY_SECONDS or interval.started_at >= now:
+        if interval.ended_at <= left_edge or interval.started_at >= now:
             continue
-        columns = _sleep_columns(interval, now)
+        columns = _sleep_columns(interval, now, marker_column)
         pre_percentage, post_percentage = _sleep_boundary_percentages(interval, history)
         if pre_percentage is None or post_percentage is None or interval.ended_at <= interval.started_at:
             continue
@@ -291,12 +372,12 @@ def _chart_rows_and_percentages(
 
         render_columns = [column for column in columns if not any(
             interval.started_at <= sample.timestamp < interval.ended_at
-            and _history_column(sample.timestamp, now) == column
+            and _history_column(sample.timestamp, now, marker_column) == column
             for sample in history
         )]
         subcolumn_percentages = []
         for column in render_columns:
-            bucket_start = column_timestamp(column, now)
+            bucket_start = column_timestamp(column, now, marker_column)
             left_timestamp, right_timestamp = _braille_subcolumn_times(bucket_start, COLUMN_SECONDS)
             for timestamp in (left_timestamp, right_timestamp):
                 percentage = sleep_percentage(timestamp)
@@ -312,33 +393,58 @@ def _chart_rows_and_percentages(
                                      percentages_by_column)
         raster = _keep_valid_subcolumns_visible(raster)
         for index, column in enumerate(render_columns):
-            bucket_start = column_timestamp(column, now)
+            bucket_start = column_timestamp(column, now, marker_column)
             center_timestamp = bucket_start + COLUMN_SECONDS / 2
             top[column], bottom[column] = _braille_fill_levels(*raster[index * 2:index * 2 + 2])
             percentages_by_column[column] = sleep_percentage(center_timestamp)
 
-    top[NOW_INDEX] = "│"
-    bottom[NOW_INDEX] = "│"
+    # Unknown-trajectory intervals (simulator ``:nodata``): the two endpoint SoC
+    # checkpoints are known but the path is not. Reuse the basic Braille raster
+    # (as the forecast does) to draw a straight-line connection, tagged so it
+    # renders neutral gray — never the SoC gradient, never the locked sleep
+    # residual-transfer / edge-smoothing contour.
+    for interval in unknown_intervals:
+        low, high = interval.pre_percentage, interval.post_percentage
+        if (low is None or high is None or interval.ended_at <= interval.started_at
+                or interval.ended_at <= left_edge or interval.started_at >= now):
+            continue
+        span = interval.ended_at - interval.started_at
+
+        def unknown_percentage(timestamp: float, _low=low, _high=high,
+                               _start=interval.started_at, _span=span) -> float:
+            fraction = max(0.0, min(1.0, (timestamp - _start) / _span))
+            return _low + (_high - _low) * fraction
+
+        columns = [column for column in _sleep_columns(interval, now, marker_column)
+                   if percentages_by_column[column] is None]
+        if not columns:
+            continue
+        subcolumn_heights = []
+        for column in columns:
+            bucket_start = column_timestamp(column, now, marker_column)
+            left_timestamp, right_timestamp = _braille_subcolumn_times(bucket_start, COLUMN_SECONDS)
+            subcolumn_heights.extend((unknown_percentage(left_timestamp) / 100 * 8,
+                                      unknown_percentage(right_timestamp) / 100 * 8))
+        raster = _keep_valid_subcolumns_visible(_early_raster(subcolumn_heights))
+        for index, column in enumerate(columns):
+            top[column], bottom[column] = _braille_fill_levels(*raster[index * 2:index * 2 + 2])
+            percentages_by_column[column] = UNKNOWN_TRAJECTORY
+
+    top[marker_column] = "│"
+    bottom[marker_column] = "│"
     kind = current.session_kind
-    full_on_ac = current.ac_online is True and (
-        current.state in {"full", "charged", "fully-charged"} or current.percentage >= 100
-    )
-    if full_on_ac or estimate is not None and kind in {"charging", "discharging"}:
-        endpoint = now + FORECAST_SECONDS
+    if estimate is not None and estimate.seconds > 0 and kind in {"charging", "discharging"}:
 
         def forecast_percentage(timestamp: float) -> float:
-            if full_on_ac:
-                return 100.0
             elapsed = max(0.0, timestamp - now)
             fraction = min(1.0, elapsed / estimate.seconds)
             target = 100.0 if kind == "charging" else 0.0
             return current.percentage + (target - current.percentage) * fraction
 
-        last_column = min(GRAPH_WIDTH - 1, project_column(endpoint, now))
-        forecast_columns = list(range(NOW_INDEX + 1, min(GRAPH_WIDTH, last_column + 1)))
+        forecast_columns = list(range(marker_column + 1, GRAPH_WIDTH))
         subcolumn_percentages = []
         for column in forecast_columns:
-            bucket_start = column_timestamp(column, now)
+            bucket_start = column_timestamp(column, now, marker_column)
             left_timestamp, right_timestamp = _braille_subcolumn_times(bucket_start, COLUMN_SECONDS)
             subcolumn_percentages.extend((forecast_percentage(left_timestamp), forecast_percentage(right_timestamp)))
         continuous_heights = [percentage / 100 * 8 for percentage in subcolumn_percentages]
@@ -346,7 +452,7 @@ def _chart_rows_and_percentages(
             _early_raster(continuous_heights)
         )
         for index, column in enumerate(forecast_columns):
-            bucket_start = column_timestamp(column, now)
+            bucket_start = column_timestamp(column, now, marker_column)
             center_timestamp = bucket_start + COLUMN_SECONDS / 2
             top[column], bottom[column] = _braille_fill_levels(*raster[index * 2:index * 2 + 2])
             percentages_by_column[column] = forecast_percentage(center_timestamp)
@@ -375,14 +481,14 @@ def format_duration(seconds: int | None) -> str:
     return f"{hours}h{minutes:02d}"
 
 
-def axis_rows(now: int) -> tuple[str, str]:
+def axis_rows(now: int, now_col: int = NOW_INDEX) -> tuple[str, str]:
     axis = ["─"] * GRAPH_WIDTH
     labels = [" "] * GRAPH_WIDTH
-    first_visible = column_timestamp(-1, now)
-    last_visible = column_timestamp(GRAPH_WIDTH, now)
+    first_visible = column_timestamp(-1, now, now_col)
+    last_visible = column_timestamp(GRAPH_WIDTH, now, now_col)
     timestamp = first_visible // TICK_SECONDS * TICK_SECONDS
     while timestamp <= last_visible:
-        position = project_column(timestamp, now)
+        position = project_column(timestamp, now, now_col)
         if 0 <= position < GRAPH_WIDTH:
             axis[position] = "┬"
         label = dt.datetime.fromtimestamp(timestamp).astimezone().strftime("%H")
@@ -392,31 +498,47 @@ def axis_rows(now: int) -> tuple[str, str]:
     return "".join(axis), "".join(labels).rstrip()
 
 
-def _style_battery(row: str, percentages: Sequence[float | None]) -> str:
-    return "".join(
-        f"{_battery_color(percentage)}{character}{RESET}"
-        if percentage is not None and character != " " else character
-        for character, percentage in zip(row, percentages)
-    )
+def _style_battery(row: str, percentages: Sequence[object]) -> str:
+    pieces = []
+    for character, percentage in zip(row, percentages):
+        if character == " ":
+            pieces.append(character)
+        elif percentage is UNKNOWN_TRAJECTORY:
+            pieces.append(f"{UNKNOWN_GRAY}{character}{RESET}")
+        elif percentage is not None:
+            pieces.append(f"{_battery_color(percentage)}{character}{RESET}")
+        else:
+            pieces.append(character)
+    return "".join(pieces)
 
 
-def title_line(current: Measurement, power_profile: str | None = None) -> str:
+def title_line(
+    current: Measurement, power_profile: str | None = None, now_col: int = NOW_INDEX,
+    heading: str = "BATTERY",
+) -> str:
     arrow = "↑" if current.session_kind == "charging" else "↓" if current.session_kind == "discharging" else "·"
-    arrow_column = GRAPH_OFFSET + NOW_INDEX
+    arrow_column = GRAPH_OFFSET + now_col
     if current.power_w is None:
         power = " -- W"
     else:
         value = f"{'~' if current.power_approximate else ''}{current.power_w:.1f}"
         power = f"{value:>6} W"
-    profile = f" ({power_profile})" if power_profile else ""
-    canvas = [" "] * (arrow_column + 1 + len(power) + len(profile))
-    _put(canvas, 0, "BATTERY")
+    # The profile face is an emoji: one code point, two terminal cells. It is
+    # placed last so nothing downstream needs re-flowing; every cell before the
+    # arrow is width 1, so the arrow still lands on ``arrow_column`` on screen.
+    face = profile_face(power_profile)
+    trailing = f"{power} {face}" if face else power
+    canvas = [" "] * (arrow_column + 1 + len(trailing))
+    _put(canvas, 0, heading)
     percentage = f"SoC {current.percentage:.0f}%"
-    _put(canvas, arrow_column - len(percentage) - 1, percentage)
+    percentage_start = arrow_column - len(percentage) - 1
+    if percentage_start >= len(heading) + 1:
+        _put(canvas, percentage_start, percentage)
     _put(canvas, arrow_column, arrow)
-    _put(canvas, arrow_column + 1, power + profile)
+    _put(canvas, arrow_column + 1, trailing)
     plain = "".join(canvas).rstrip()
-    return f"{BOLD}{CYAN}{plain[:7]}{RESET}{plain[7:arrow_column]}{YELLOW}{arrow}{RESET}{plain[arrow_column + 1:]}"
+    return (f"{BOLD}{CYAN}{plain[:len(heading)]}{RESET}{plain[len(heading):arrow_column]}"
+            f"{YELLOW}{arrow}{RESET}{plain[arrow_column + 1:]}")
 
 
 def render_dashboard(
@@ -428,8 +550,12 @@ def render_dashboard(
     sleep_intervals: Sequence[SleepInterval] = (),
     health_percent: float | None = None,
     power_profile: str | None = None,
+    heading: str = "BATTERY",
+    unknown_intervals: Sequence[SleepInterval] = (),
 ) -> str:
-    top, bottom, percentages = _chart_rows_and_percentages(current, history, estimate, now, sleep_intervals)
+    marker_column = now_column(current, estimate)
+    top, bottom, percentages = _chart_rows_and_percentages(
+        current, history, estimate, now, sleep_intervals, unknown_intervals)
     elapsed = None if session is None else max(0, now - session.started_at)
     left_label = format_duration(elapsed).ljust(GRAPH_OFFSET)
     if estimate is None:
@@ -437,14 +563,14 @@ def render_dashboard(
     else:
         end_time = dt.datetime.fromtimestamp(now + estimate.seconds).astimezone().strftime("%H:%M")
         right_label = f"{format_duration(estimate.seconds)} ~{end_time}"
-    axis, labels = axis_rows(now)
+    axis, labels = axis_rows(now, marker_column)
     left_meaning = "start" if elapsed is not None else ""
     right_meaning = ("full" if current.session_kind == "charging" else "empty") if (
         estimate is not None and current.session_kind in {"charging", "discharging"}
     ) else ""
     return "\n".join(
         (
-            title_line(current, power_profile),
+            title_line(current, power_profile, marker_column, heading),
             f"{MUTED}{left_label}{RESET}{_style_battery(top, percentages)} {DIM}{right_label}{RESET}",
             f"{MUTED}{DIM}{left_meaning.ljust(GRAPH_OFFSET)}{RESET}{_style_battery(bottom, percentages)} "
             f"{MUTED}{DIM}{right_meaning}{RESET}".rstrip(),

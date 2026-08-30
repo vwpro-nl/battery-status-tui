@@ -23,6 +23,12 @@ from .v1_storage import GenerationSnapshot, V1Storage, V1StorageError
 
 
 BREAK_BEFORE = 0x0100
+# A finalized hour may miss a poll or two (well under the 180 s unknown-gap
+# threshold) yet still hold a continuous SoC trajectory. Render its two endpoint
+# samples when at least this much of the hour was observed; hours with real
+# sleep or a wide unknown span drop below it and stay blank / owned by the
+# sleep-interval path.
+NEAR_COMPLETE_OBSERVED_MS = HOUR_MS - 5 * 60_000
 METHODS = {
     0: "unavailable",
     1: "power-now",
@@ -243,7 +249,7 @@ class V1History:
         hourly = []
         for row in rows:
             hour = int(row["hour_start_ms"])
-            if hour in recent_hours or int(row["observed_ms"]) != HOUR_MS:
+            if hour in recent_hours or int(row["observed_ms"]) < NEAR_COMPLETE_OBSERVED_MS:
                 continue
             if row["soc_start"] is None or row["soc_end"] is None:
                 continue

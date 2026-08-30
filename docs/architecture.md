@@ -120,21 +120,25 @@ counts match the header's declared counts.
 ## `recent_series`: temporary, recoverable sub-hour state
 
 `recent_series` is a compact binary blob (`recent_series.py`, magic `BRS1`)
-stored inside each checkpoint generation. It holds up to the last **8 hours**
-(and at most 65 535) of poll points: timestamp, SoC (millipercent), resolved
-power (mW), a compatible energy delta, battery state, active profile, battery
-set, and a `flags` word (AC state, power method, approximate bit, confidence,
-and a *break-before* bit marking a discontinuity).
+stored inside each checkpoint generation. It holds up to the last **12 hours and
+20 minutes** (`MAX_WINDOW_MS`, and at most 65 535) of poll points: timestamp,
+SoC (millipercent), resolved power (mW), a compatible energy delta, battery
+state, active profile, battery set, and a `flags` word (AC state, power method,
+approximate bit, confidence, and a *break-before* bit marking a discontinuity).
 
 It is "temporary" in the sense that once a UTC hour closes, that hour's points
 are folded into an immutable `hourly_history` row and are no longer needed for
 correctness — but the still-open hour lives only here until it is finalized.
 Losing the newest checkpoint therefore costs at most the current partial hour,
-and recovery falls back to an older generation that still covers it.
+and recovery falls back to an older generation that still covers it. The window
+is sized to the widest history the dashboard can draw — 12 h of dynamic-`NOW`
+viewport plus one 20-minute column of clock-alignment slack — so every visible
+history column is backed by real sub-hour samples; anything older is served from
+the permanent `hourly_history` aggregates.
 
 Decoding is strict: any structural violation (non-increasing timestamps, window
-over 8 h, out-of-range enum, dictionary not canonical, length mismatch) raises
-`RecentSeriesError` and the generation is treated as invalid.
+past `MAX_WINDOW_MS`, out-of-range enum, dictionary not canonical, length
+mismatch) raises `RecentSeriesError` and the generation is treated as invalid.
 
 ## Durability: WAL, transactions, digests
 

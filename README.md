@@ -3,7 +3,7 @@
 `battery-status-tui` is a compact, standalone battery monitor for Linux. It
 records low-overhead local history, separates charging and discharging sessions,
 reconstructs suspend and hibernate gaps, and renders twelve hours of context —
-six hours of measured history, a fixed `NOW` column, and six hours of forecast —
+measured history and a forecast that reaches the predicted full/empty time —
 in five lines of terminal output.
 
 It uses only the Python standard library, needs no root, and runs no
@@ -17,8 +17,8 @@ dashboard can consume its database later without coupling to the collector.
 
 - One glance: current SoC, charge/discharge direction, power draw, ETA,
   State-of-Health, and active power profile.
-- A 12-hour graph: 6 h history · fixed `NOW` · 6 h forecast, on a stable
-  20-minute grid.
+- A graph up to 12 h wide on a stable 20-minute grid: a dynamic `NOW` marker
+  with history on the left and a forecast on the right sized to the ETA.
 - Honest history: measured time, proven sleep/hibernate time, and unknown gaps
   are visually distinct. Known data is always visible; blank means unknown.
 - Field-level fusion of `/sys/class/power_supply` and UPower, with a layered
@@ -34,8 +34,9 @@ dashboard can consume its database later without coupling to the collector.
 - Linux with `/sys/class/power_supply` **and/or** UPower (`upower` CLI).
 - Python 3.11 or newer, plus `pip` for installation. The application itself has
   no third-party runtime packages.
-- A terminal with Unicode (block + Braille glyphs) and 24-bit color for the
-  graph. Check yours with `battery-status-tui --unicode-probe`.
+- A terminal with Unicode (block + Braille glyphs, and emoji for the
+  power-profile face) and 24-bit color for the graph. Check yours with
+  `battery-status-tui --unicode-probe`.
 - Optional, each degrades gracefully if absent:
   - `journalctl` — durable suspend/hibernate reconstruction;
   - `powerprofilesctl` / `busctl` / `/sys/firmware/acpi/platform_profile` —
@@ -118,7 +119,7 @@ When stdout is not a terminal, the program renders once and exits, so
 | `--interval SECONDS` | Interactive refresh interval (default `60`). |
 | `--database PATH` | Use an alternate SQLite history file (default `${XDG_STATE_HOME:-~/.local/state}/battery-status-tui/history.sqlite3`). |
 | `--diagnose` | Inspect live sources and print power, health, session, identity, and database details without collecting or modifying the history database. |
-| `--unicode-probe` | Print the block/Braille/axis glyphs the renderer uses, to verify terminal font support. |
+| `--unicode-probe` | Print the block/Braille/profile/axis glyphs the renderer uses, to verify terminal font support. |
 | `--version` | Print the version and exit. |
 
 `--once`, `--sample`, `--diagnose`, and `--unicode-probe` are mutually
@@ -127,22 +128,24 @@ exclusive.
 ## Reading the graph
 
 ```
-BATTERY         SoC 72% ↓  12.4 W (balanced)
-0h48  ▇▇▆▆▆▆▆▅▅▅▅▅▅▄▄▄▄▄│⡀                  3h10 ~16:10
-start ██████████████████│⣿⣿⣶⣶⣤⣄⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀ empty
-      ┬──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬
-      07 08 09 10 11 12 13 14 15 16 17 18     SoH 94.3%
+BATTERY                 SoC 72% ↓  12.4 W 😎
+0h48             ▁▂▂▂▂▂▂▂▃▃▃▃▃▃▃│⣀          3h10 ~18:20
+start            ███████████████│⣿⣿⣷⣶⣦⣤⣀⣀⣀⣀ empty
+      ──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬─
+        07 08 09 10 11 12 13 14 15 16 17 18   SoH 94.3%
 ```
 
-- **12 hours, fixed layout.** 18 columns (6 h) of history, the `NOW` column
-  (`│`), 18 columns (6 h) of forecast. Each column is 20 minutes, aligned to
-  absolute clock boundaries, so the grid only shifts when a real 20-minute
-  boundary passes. The title arrow sits above `NOW`.
+- **Up to 12 hours, dynamic `NOW`.** 37 columns of 20 minutes each. The `NOW`
+  column (`│`) is not fixed: the forecast to its right is only as wide as it
+  needs to be to reach the predicted `full`/`empty` time, and everything else
+  is history to its left. A short ETA pushes `NOW` right and shows more past; a
+  long ETA pulls it left; with no ETA `NOW` sits at the right edge. The grid is
+  aligned to absolute clock boundaries and the title arrow sits above `NOW`.
 - **Observed solid history** — block characters `▁`–`█`, gradient-colored by
   SoC. This is time the collector was awake and measuring.
 - **Sleep / hibernate** — Braille cells in the history region, SoC interpolated
   between the readings before and after a *proven* suspend/hibernate span.
-- **Forecast** — Braille cells right of `NOW`.
+- **Forecast** — Braille cells right of `NOW`, ending on the predicted time.
 - **Unknown gaps** — blank. The collector was not running, or continuity broke
   with no sleep evidence.
 - **Known low SoC vs unknown.** Every measured history bucket shows at least
@@ -150,11 +153,9 @@ start ██████████████████│⣿⣿⣶⣶⣤�
   `#550A14`. Valid sleep and forecast trajectories at 0% keep a bottom Braille
   dot. Only genuinely-unknown cells are blank. The rule throughout: *known data
   stays visible; empty means no reliable data.*
-- **Held-at-empty forecast.** A discharge forecast that reaches 0% stays at 0%
-  in `#550A14` for the rest of the 6-hour window rather than being truncated.
-- **Charging plateau.** A charge forecast that reaches 100% plateaus at a full
-  column to the end of the window; a battery already full on AC shows a flat
-  100% line.
+- **Forecast direction.** A discharge forecast runs down to 0% at the predicted
+  empty time (deep red `#550A14`); a charge forecast runs up to a full column
+  at the predicted full time. The forecast never reverses direction.
 - **Color gradient.** `#550A14` at 0% → `#9B231E` at 25% → `#AF6E19` at 50% →
   `#5A8228` at 75% → `#146932` at 100%, linearly interpolated.
 - **`start` / `full` / `empty` / ETA.** Left of the rows: time since the current
@@ -163,8 +164,10 @@ start ██████████████████│⣿⣿⣶⣶⣤�
   discharging. `--` when there is no estimate.
 - **SoH.** `SoH X.X%` on the label line when a State-of-Health value can be
   resolved from capacity vs. design capacity.
-- **Power profile.** Shown in parentheses after the power reading when
-  power-profiles-daemon or the kernel platform profile is available.
+- **Power profile.** An emoji face after the power reading when
+  power-profiles-daemon or the kernel platform profile is available: 🥵
+  performance, 😎 balanced, 😴 power-saver. Missing or unrecognized shows no
+  face.
 - **Power source.** `X.X W` is a direct reading; `~X.X W` is a time-derived
   estimate; `-- W` means no usable value. sysfs is preferred, UPower fills gaps,
   and a UPower-only snapshot is used if sysfs is unavailable.
@@ -224,6 +227,64 @@ schema-v4 storage and recovery, suspend/hibernate reconstruction (including
 cold-boot hibernation), session boundaries, forecast and 0%-visibility
 rendering, the pre-1.0 converter and its independent validator, and the
 schema-dispatch behavior of the CLI.
+
+### Simulating the dashboard
+
+`battery_status_tui.simulate` renders the dashboard from a scenario so you can
+eyeball graph behaviour without waiting for a real battery event. It drives the
+real production renderer and estimator with in-memory model objects and shows a
+`SIMULATION` heading so the output is never mistaken for the live dashboard. It
+never starts a collector, timer, or systemd unit.
+
+```bash
+# synthetic: measured history -> a proven 6 h sleep dropping SoC 97% -> 40% -> resume
+PYTHONPATH=src python3 -m battery_status_tui.simulate sleep-drop
+PYTHONPATH=src python3 -m battery_status_tui.simulate sleep-drop \
+    --start-soc 100 --resume-soc 25 --sleep-hours 8 --after discharging
+
+# --simulate: keep the genuine live graph, then append a hypothetical timeline
+PYTHONPATH=src python3 -m battery_status_tui.simulate sleep-drop \
+    --simulate 2h=50% 3h:sleep=-20% 1h:nodata 45m=82% ac
+PYTHONPATH=src python3 -m battery_status_tui.simulate sleep-drop \
+    --simulate 35m=-4% 3h12m:sleep=-28% 27m=+8% 1h18m:nodata=-12% 2h05m=82% ac=24.2w
+```
+
+**Synthetic mode** builds `sleep-drop` from scratch in memory — no
+battery-history database is opened, read, written, or created (there is no
+`--database` option), and output is deterministic.
+
+**`--simulate`** anchors to the genuine live dashboard and appends a sequential
+timeline. Grammar:
+
+```
+--simulate <duration>[:<type>][=<soc>] ...  [ac[=<watts>w] | dc[=<watts>w]]
+```
+
+| Token part | Meaning |
+|---|---|
+| `<duration>` | `2h` `1h24m` `45m` `90s` `2h05m` — measured from the *previous* checkpoint, not the original NOW; positive; may be shorter than one 20-minute column |
+| `:sleep` | a known sleep/suspend interval — the locked colour-gradient Braille reconstruction between the known endpoints |
+| `:nodata` | endpoints known, trajectory not — a straight-line Braille connection drawn in **neutral light gray** (never the SoC gradient), visually distinct from `:sleep`. Genuine history gaps with no reliable later endpoint stay blank. |
+| *(no type)* | an ordinary active interval whose SoC trajectory is drawn from the endpoints |
+| `=82%` / `=100%` | end at that **absolute** SoC |
+| `=-20%` / `=+30%` | change the preceding SoC by that many **percentage points** (clamped 0–100; absolute outside 0–100 is rejected) |
+| *(no `=soc`)* | SoC unchanged across the block |
+| final `ac` / `dc` | power-source context at the fictitious NOW; omitted → keep the genuine live context. The genuine live power magnitude is the default rate (even when the context is reversed); a genuine `None` stays `None`. |
+| final `ac=24.2w` / `dc=8.3w` | plus an explicit battery-power magnitude (positive, finite, > 0) for the fictitious NOW |
+
+The genuine history and its real Measurement values, irregular SoC, colour
+gradient, existing sleeps, session, battery identity, health and power profile
+are kept **verbatim**; only the future blocks are synthetic. The end of the last
+block is the fictitious NOW; state and forecast there come from the **production
+estimator** (the simulator never computes its own ETA). The total simulated
+timeline must fit the graph's history window (`graph.MAX_SPAN_SECONDS`, 12 h) or
+the command is rejected before rendering — nothing is truncated or rescaled.
+
+The production database is read **once, read-only** (`mode=ro`,
+`PRAGMA query_only=ON` — writing is technically impossible); a missing database
+is reported, never created; no writer, migration, checkpoint or metadata path is
+touched. The independently running collector keeps writing genuine data and is
+unaffected.
 
 ## License
 

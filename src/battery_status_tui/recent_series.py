@@ -12,7 +12,12 @@ from typing import Sequence
 
 MAGIC = b"BRS1"
 FORMAT_VERSION = 1
-MAX_WINDOW_MS = 8 * 60 * 60 * 1_000
+# Fine-grained sub-hour retention: the widest dynamic history viewport the
+# dashboard can draw (12 h) plus one 20-minute graph bucket, so the leftmost
+# visible column — which may begin just before now - 12 h because columns are
+# aligned to absolute clock boundaries — is still backed by real samples.
+# Older sub-hour shape lives only in the permanent hourly_history aggregates.
+MAX_WINDOW_MS = 12 * 60 * 60 * 1_000 + 20 * 60 * 1_000
 UNKNOWN_POWER_MW = -(2 ** 31)
 UNKNOWN_PROFILE_INDEX = 0xFF
 
@@ -101,7 +106,7 @@ def encode_recent_series(points: Sequence[RecentPoint]) -> bytes:
     if timestamps[0] < 0 or any(right <= left for left, right in zip(timestamps, timestamps[1:])):
         raise RecentSeriesError("timestamps must be non-negative and strictly increasing")
     if timestamps[-1] - timestamps[0] > MAX_WINDOW_MS:
-        raise RecentSeriesError("recent-series exceeds eight hours")
+        raise RecentSeriesError("recent-series exceeds the retention window")
 
     profiles = _dictionary([point.profile for point in points if point.profile is not None])
     battery_sets = _dictionary([point.battery_set_key for point in points])
@@ -218,7 +223,7 @@ def decode_recent_series(payload: bytes) -> tuple[RecentPoint, ...]:
         if timestamp <= previous_timestamp:
             raise RecentSeriesError("timestamps are not strictly increasing")
         if timestamp - base_timestamp > MAX_WINDOW_MS:
-            raise RecentSeriesError("recent-series exceeds eight hours")
+            raise RecentSeriesError("recent-series exceeds the retention window")
         if soc > 100_000:
             raise RecentSeriesError("SoC is outside 0..100000 millipercent")
         if power != UNKNOWN_POWER_MW and power < 0:
