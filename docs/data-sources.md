@@ -32,7 +32,8 @@ alongside `CLOCK_MONOTONIC`, `CLOCK_BOOTTIME`, and the kernel `boot_id`.
 
 Multiple system batteries are aggregated: SoC is capacity-weighted, energy and
 capacity are summed, and the state is charging if any pack is charging, else
-discharging if any pack is discharging.
+discharging if any pack is discharging. Power is all-or-unavailable: every pack
+must supply a usable value before their readings are summed.
 
 ## Power resolution
 
@@ -60,12 +61,19 @@ coarse counters and takes the median of valid deltas.
 
 | Rendering | Meaning |
 | --- | --- |
-| `7.2 W` | direct reading (methods 1–3) |
-| `~7.2 W` | time-derived estimate (methods 4–5), the `approximate` flag is set |
-| `-- W` | no usable value |
+| `7.2W` | direct reading (methods 1–3) |
+| `~7.2W` | time-derived estimate (methods 4–5), the `approximate` flag is set |
+| `--W` | no usable value |
 
 The hourly aggregates keep `direct_power_ms`, `estimated_power_ms` and
 `unknown_power_ms` so the split is preserved in history.
+
+The interactive viewer additionally samples sysfs only at 1 Hz for its title.
+That path never invokes UPower or SQLite. It prefers `power_now`, then
+`current_now × voltage_now`; while discharging only, it can derive a sparse
+120–600 s counter delta from `energy_now`, or from `charge_now ×` mean voltage.
+Direct readings supersede cached counter estimates, and an unchanged counter
+estimate is not treated as a new observation on every heartbeat.
 
 ## `--diagnose`
 

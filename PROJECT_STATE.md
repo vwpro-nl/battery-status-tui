@@ -8,13 +8,16 @@ the project. Update it when an accepted architectural or LOCKED decision changes
 
 ## 1. Current baseline
 
-- **Checkpoint commit:** `6e39d0ddc2ebb81c966fa7a0ee40edaceffb23c6`
-  — *Add dynamic battery timeline simulation*
+- **Checkpoint commit:** `b9ff15f` — *Update documentation for current
+  dashboard behavior* (the current development round remains uncommitted).
 - **Production TUI purpose:** a compact terminal dashboard for one Linux
   laptop's internal battery — current SoC, charge/discharge direction, power
   draw, remaining-time ETA, State-of-Health, active power profile, and a
-  12-hour Unicode graph that renders measured history, proven suspend/hibernate
-  spans, forecast, and unknown gaps as visually distinct things.
+  15 h 40 m Unicode graph that renders measured history, proven suspend/hibernate
+  spans, forecast, and unknown gaps as visually distinct things. Viewer chrome
+  is one MUTED footer line under the locked dashboard (local clock,
+  configured `--interval`, refresh countdown); it is not produced by
+  `render_dashboard`.
 - **Simulator purpose (`python -m battery_status_tui.simulate`):** a durable
   visual/manual regression-testing facility. It drives the **real** production
   renderer and the **real** remaining-time estimator with in-memory model
@@ -22,7 +25,7 @@ the project. Update it when an accepted architectural or LOCKED decision changes
   gaps, forecast shapes, viewport behaviour) without waiting for real hardware
   events. It shows a `SIMULATION` heading so its output can never be mistaken
   for the live dashboard.
-- **Test count:** 343 passing at this checkpoint
+- **Test count:** 456 passing in the current working tree before this audit
   (`PYTHONPATH=src python -m unittest discover -s tests`).
 - **Dependencies:** Python standard library only. `pyproject.toml` declares
   `dependencies = []`; no non-stdlib import exists anywhere in
@@ -57,31 +60,26 @@ Three layers, read newest-first:
    or restart.
 
 **Retention of `recent_series`:**
-`MAX_WINDOW_MS = 12 h + one 20-minute bucket = 12 h 20 min` (44,400,000 ms),
-equal to `(graph.MAX_SPAN_SECONDS + graph.COLUMN_SECONDS) * 1000`.
+`MAX_WINDOW_MS = 16 h` (57,600,000 ms), equal to the 15 h 40 m graph plus
+one 20-minute clock-alignment margin.
 
-**Why the fine window exists:** the graph can show at most a 12-hour history
-span, and its columns are aligned to absolute wall-clock 20-minute boundaries,
-so the leftmost visible column can begin just before `now − 12 h`. Keeping
-12 h 20 min of real sub-hour samples means the entire visible viewport is backed
-by genuine measurements, while long-term history stays compact as one row per
-hour. **There is no permanent 20-minute historical layer** and none is planned;
-sub-hour shape older than the window is irreversibly aggregated away.
+**Why the fine window exists:** the graph can show 15 h 40 m, and its columns
+are aligned to absolute wall-clock 20-minute boundaries. Sub-hour
+`recent_series` keeps 16 h of real samples, covering the visible span and its
+alignment margin. Permanent `hourly_history` aggregates do not become
+pseudo-20-minute graph samples. **There is no
+permanent 20-minute historical layer** and none is planned; sub-hour shape
+older than the window is irreversibly aggregated away.
 
 **Observed / sleep / unknown stay semantically distinct** at every layer:
 measured time, reconstructed suspend/hibernate time, and genuinely unknown time
 are separate quantities in the hourly partition and separate visual treatments
 in the graph (see §3).
 
-**Near-complete finalized hours.** When building the graph, a finalized
-`hourly_history` row contributes its `soc_start` / `soc_end` endpoint samples
-*unless* that hour is already covered by `recent_series` samples **or**
-`observed_ms < NEAR_COMPLETE_OBSERVED_MS` (`HOUR_MS − 5 min`, i.e. under
-55 minutes observed). So an hour that merely missed a poll or two still shows
-its endpoints and the wider dynamic viewport has no blank band between the
-hourly aggregates and the sub-hour history; an hour with substantial sleep or
-unknown time does not contribute misleading endpoints.
-(`v1_history.py::V1History._history`.)
+**Finalized hours.** `hourly_history` remains available for durable accounting,
+but graph history is built only from genuine checkpoint `recent_series`
+measurements. Hourly summaries are never presented as 20-minute observations
+(`v1_history.py::V1History._history`).
 
 **Health data — `battery_health`.** Slow-changing capacity/wear facts
 (`energy_full_wh`, `energy_full_design_wh`, `charge_full_ah`, `cycle_count`,
@@ -155,15 +153,16 @@ Graph geometry (verified in `graph.py`):
 
 | Constant | Value |
 |---|---|
-| `TIME_COLUMNS` | 36 |
-| `GRAPH_WIDTH` (`TIME_COLUMNS + 1`) | 37 |
+| `TIME_COLUMNS` | 47 |
+| `GRAPH_WIDTH` (`TIME_COLUMNS + 1`) | 48 |
+| `GRAPH_ROWS` | 3 |
 | `COLUMN_SECONDS` | 1200 (20 min) |
-| `MAX_SPAN_SECONDS` (`TIME_COLUMNS * COLUMN_SECONDS`) | 43200 (12 h) |
-| `NOW_INDEX` (`TIME_COLUMNS // 2`) | 18 — graph midpoint |
+| `MAX_SPAN_SECONDS` (`TIME_COLUMNS * COLUMN_SECONDS`) | 56400 (15 h 40 m) |
+| `NOW_INDEX` (`TIME_COLUMNS // 2`) | 23 — graph midpoint |
 | `TICK_SECONDS` | 3600 |
 | `GRAPH_OFFSET` (left label gutter) | 6 |
 
-- The `NOW` column (`│` in both graph rows) separates measured history (left)
+- The `NOW` column (`│` in all three graph rows) separates measured history (left)
   from forecast (right). History never crosses right of it; forecast never
   crosses left.
 - `NOW` moves **dynamically**: `now_column()` = `GRAPH_WIDTH - 1 -
@@ -171,13 +170,13 @@ Graph geometry (verified in `graph.py`):
   needs to reach the predicted full/empty time (`ceil(eta / COLUMN_SECONDS)`
   columns), flush against the right edge; every remaining column goes to
   history.
-- `NOW` may **never** move left of the graph midpoint (`NOW_INDEX` = 18):
-  `_forecast_span_columns` is capped at `GRAPH_WIDTH - 1 - NOW_INDEX` = 18
-  columns (≈ 6 h). At least half the width is therefore always history.
+- `NOW` may **never** move left of the graph midpoint (`NOW_INDEX` = 23):
+  `_forecast_span_columns` is capped at `GRAPH_WIDTH - 1 - NOW_INDEX` = 24
+  columns (8 h). At least 23 columns are therefore always history.
 - A forecast longer than the right half is **clipped at the right edge** — the
   drawn curve simply stops mid-slope. It is **not** compressed or rescaled.
-- The **textual ETA and predicted clock time in the right-hand label stay
-  complete and authoritative** even when the graphical forecast is clipped.
+- The textual ETA duration stays complete and authoritative even when the
+  graphical forecast is clipped.
 - With no usable forecast (battery full/stable, no ETA, or session is neither
   charging nor discharging) `NOW` sits at the far-right column and the whole
   width shows history.
@@ -194,21 +193,17 @@ recent past readable regardless of the forecast horizon.
 
 ## 5. Power-profile indicator
 
-`graph.POWER_PROFILE_FACES` (single source of the mapping):
+`graph.POWER_PROFILE_COLORS` (single source of the mapping):
 
-| Profile | Face |
+| Profile | Label |
 |---|---|
-| `performance` | 🥵 |
-| `balanced` | 😎 |
-| `power-saver` | 😴 |
-| unknown / missing | *(no face)* |
+| `power-saver` | `P`, xterm 238 |
+| `balanced` | `P`, xterm 244 |
+| `performance` | `P`, xterm 252 |
+| unknown / missing | *(no indicator)* |
 
-These are **emoji and render two terminal cells wide**. The title layout
-measures terminal-cell width (`graph.display_width` / `_char_width`, backed by
-`unicodedata`) so the face does not disturb the SoC, wattage, or `NOW`-arrow
-columns. Do **not** replace them with assumed one-cell glyphs without explicit
-design work and terminal-rendering testing — an earlier one-cell attempt was
-rejected. `--unicode-probe` prints these faces among the glyphs to check.
+The one-cell indicator follows the compact wattage on the title line, separated
+by one space. It is not bold.
 
 ---
 
@@ -254,7 +249,7 @@ unit; the simulator never computes its own ETA.
   explicit relative percentage-point change (clamped 0–100); omitted → SoC
   unchanged across the block.
 - **Window limit:** the total simulated timeline may not exceed
-  `graph.MAX_SPAN_SECONDS` (12 h, the shared production maximum graph span).
+  `graph.MAX_SPAN_SECONDS` (15 h 40 m, the shared production maximum graph span).
   Over-length input is **rejected before rendering** — nothing is silently
   truncated or compressed (`parse_timeline`).
 

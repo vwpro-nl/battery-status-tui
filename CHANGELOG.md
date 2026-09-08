@@ -8,6 +8,15 @@ based on [Keep a Changelog](https://keepachangelog.com/). This project follows
 
 ### Changed
 
+- The graph is three plotting rows by 48 cells (47 time columns plus `NOW`)
+  on the existing 20-minute scale, so the visible span is 15 h 40 m. The
+  fine-grained `recent_series` retention is 16 h so the full viewport plus
+  its clock-alignment margin is covered truthfully; hourly aggregates never
+  become pseudo-20-minute graph samples.
+- The power-profile indicator is a one-cell `P` after the compact wattage,
+  colored xterm 238 / 244 / 252 for eco / normal / turbo.
+  The previous emoji faces are gone. Unknown or missing profiles still show
+  nothing.
 - The graph viewport is now dynamic. The `NOW` marker is no longer fixed at the
   centre: the forecast to its right is sized to reach the predicted full/empty
   time and no further, and every remaining column is given to history on the
@@ -21,25 +30,39 @@ based on [Keep a Changelog](https://keepachangelog.com/). This project follows
   the charge forecast up to a full column at the predicted full time, instead of
   holding a flat plateau across a fixed 6-hour window. A battery already full on
   AC draws no forecast.
-- The active power profile is shown as an emoji face — 🥵 performance, 😎
-  balanced, 😴 power-saver — instead of the spelled-out name in parentheses. The
-  title layout measures terminal-cell width, so the two-cell face does not
-  disturb the SoC, wattage, or NOW-arrow columns. A missing or unrecognized
-  profile shows no face.
-- Finalized hourly history that missed a poll or two (still far below the
-  unknown-gap threshold) now contributes its endpoint samples to the graph, so
-  the wider dynamic viewport no longer shows a blank band between the hourly
-  aggregates and the sub-hour history. Hours with real sleep or a wide unknown
-  span are unchanged.
-- The checkpoint's compact `recent_series` now retains 12 hours 20 minutes of
-  sub-hour points (was 8 hours), matching the widest history the dynamic graph
-  can draw plus one column of clock-alignment slack, so the whole visible
-  history is backed by real measurements. `hourly_history` remains the permanent
-  canonical record; no persistent sub-hour layer is added. Applies to samples
-  collected from now on.
+- The checkpoint's compact `recent_series` now retains 16 hours of sub-hour
+  points (was 8 hours), covering the 15 h 40 m graph plus one column of
+  clock-alignment slack. Only these genuine measurements feed historical graph
+  cells; `hourly_history` remains the permanent canonical accounting record and
+  is not presented as pseudo-20-minute data. Applies to samples collected from
+  now on.
 
 ### Added
 
+- The interactive persisted viewer now has an independent 1 Hz, sysfs-only live
+  title path for AC state, battery state, SoC, direction, and power. Live power
+  prefers `power_now`, then `current_now × voltage_now`; discharge-only counter
+  fallback uses `energy_now`, then `charge_now ×` mean voltage over a valid
+  120–600 s window. Filtering resets at transitions and discontinuities,
+  protects against transient zero readings, and does not count a cached sparse
+  estimate as a new heartbeat observation. UPower and SQLite remain outside
+  this high-frequency path.
+- Live direction immediately controls the arrow and `full` / `empty` semantics.
+  An opposite-direction persisted ETA is suppressed as `--` until compatible
+  minute-level history arrives. A completed charge freezes its elapsed duration
+  and can be reconstructed after viewer restart only from compatible persisted
+  full-charge evidence using the recorded completion time.
+- Diagnostic interactive options can display persisted and/or weighted live
+  power and configure power precision and weighted sample count. They are off
+  by default, leaving only the current live power in the title.
+- The interactive and `--once` viewers append one muted footer line under the
+  locked dashboard: local date and time at minute precision, the
+  configured `--interval`, and a countdown to the next stored-state refresh.
+  A 1-second display heartbeat updates the clock and countdown without extra
+  UPower/sysfs/history reads. The footer starts at `GRAPH_OFFSET`, the same
+  column as the graph's left edge, so a shrinking countdown only shortens the
+  right-hand end. Narrow panes drop the date/time first; a terminal too short
+  to hold the extra line omits the footer rather than clipping the graph.
 - `python -m battery_status_tui.simulate` — a dashboard-simulation facility for
   visual/manual regression testing. It drives the real renderer and estimator
   with in-memory model objects, shows a `SIMULATION` heading, and never starts a
@@ -89,7 +112,7 @@ First public release.
   fallback when sysfs is unavailable; peripheral batteries excluded.
 - Layered power resolver: `power_now` → current × voltage → UPower energy-rate →
   time-derived energy delta → time-derived charge delta. Direct readings render
-  as `X.X W`, estimates as `~X.X W`, unavailable as `-- W`.
+  as `X.XW`, estimates as `~X.XW`, unavailable as `--W`.
 - Multi-battery aggregation with capacity-weighted SoC and summed energy.
 - Remaining-time ETA from a Theil–Sen slope over 5-minute buckets of the current
   session, with UPower time-remaining and energy-rate fallbacks.

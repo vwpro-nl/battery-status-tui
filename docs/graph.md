@@ -1,29 +1,33 @@
 # The graph
 
-The dashboard is five lines of text: a title line, two graph rows, an axis
-line, and an axis-label line (which also carries the SoH readout). All of it is
-produced by `graph.render_dashboard`.
+The dashboard is six lines of text: a title line, three graph rows, an axis
+line, and an axis-label line. All of it is
+produced by `graph.render_dashboard`. The interactive and `--once` viewers
+append one extra MUTED footer line (`footer.attach_footer`) under that body,
+starting at `GRAPH_OFFSET` so it lines up with the graph's left edge.
 
 ## Geometry and timing
 
 | Quantity | Value | Constant |
 |---|---|---|
-| Total columns | 37 | `GRAPH_WIDTH` (`TIME_COLUMNS + 1`) |
+| Total columns | 48 | `GRAPH_WIDTH` (`TIME_COLUMNS + 1`) |
+| Time cells | 47 | `TIME_COLUMNS` |
+| Plotting rows | 3 | `GRAPH_ROWS` |
 | Column width in time | 20 minutes | `COLUMN_SECONDS` |
-| Maximum span | 12 hours | `MAX_SPAN_SECONDS` (`TIME_COLUMNS * COLUMN_SECONDS`) |
+| Maximum span | 15 h 40 m | `MAX_SPAN_SECONDS` (`TIME_COLUMNS * COLUMN_SECONDS`) |
 | NOW column | dynamic, never left of the midpoint | `now_column()` |
-| Graph midpoint / minimum history | 18 columns (`TIME_COLUMNS // 2`) | `NOW_INDEX` |
+| Graph midpoint / minimum history | 23 columns (`TIME_COLUMNS // 2`) | `NOW_INDEX` |
 | Axis ticks | every 1 hour | `TICK_SECONDS` |
 | Left label gutter | 6 characters | `GRAPH_OFFSET` |
 
-The graph is always 37 columns of 20 minutes each — at most a **12-hour**
+The graph is always 48 columns with 47 20-minute time cells — exactly a **15 h 40 m**
 window. Columns are aligned to absolute wall-clock 20-minute boundaries, not to
 "20 minutes ago" — the grid is stable between refreshes and only shifts when a
 real 20-minute boundary passes.
 
 ### Dynamic NOW column
 
-The NOW column (`│` in both graph rows) is **not fixed**. Its position is set by
+The NOW column (`│` in all three graph rows) is **not fixed**. Its position is set by
 the forecast horizon (`now_column()`):
 
 * The forecast to the **right** of NOW is only as wide as it needs to be to
@@ -34,11 +38,11 @@ the forecast horizon (`now_column()`):
   need is available to history, so a short ETA pushes NOW right and reveals more
   past; a long ETA pulls NOW left.
 * NOW **never moves left of the graph midpoint** (`NOW_INDEX`,
-  `TIME_COLUMNS // 2` = 18): at least half the width always stays available to
+  `TIME_COLUMNS // 2` = 23): at least half the width always stays available to
   history. A forecast longer than the right half (`GRAPH_WIDTH - 1 - NOW_INDEX`
-  columns ≈ 6 h) is drawn only up to the right edge — the visible curve simply
+  columns = 8 h) is drawn only up to the right edge — the visible curve simply
   stops mid-slope. It is **not** compressed or rescaled to fit; the exact ETA
-  and predicted clock time stay complete and authoritative in the right-hand
+  duration stays complete and authoritative in the right-hand
   label.
 * When there is no meaningful forecast (battery full/stable, or no ETA yet), NOW
   sits at the far right edge and the whole width shows history.
@@ -51,10 +55,10 @@ share one time-to-screen mapping.
 ### Columns and sub-columns
 
 Each column is one character. Solid history uses vertical block characters
-(`▁▂▃▄▅▆▇█`, 16 half-levels across the two rows). Braille cells (history during
+(`▁▂▃▄▅▆▇█`, 24 levels across the three rows). Braille cells (history during
 sleep, and all forecast) split each column into **2 sub-columns × 4 vertical dot
-positions = 8 levels**, sampled at 5 minutes and 15 minutes into the 20-minute
-column.
+positions × 3 rows = 12 levels**, sampled at 5 minutes and 15 minutes into the
+20-minute column.
 
 ## What each cell means
 
@@ -79,8 +83,8 @@ no reliable data.** Concretely:
   interpolated or extrapolated to fill it; a blank area is preferable to an
   invented line.
 
-Above the minimum block, solid history retains its normal 16-level
-quantization. Braille rows retain their separate 8-level geometry.
+Above the minimum block, solid history retains its 24-level quantization.
+Braille rows retain their separate 12-level geometry.
 
 ## Color gradient
 
@@ -136,11 +140,13 @@ so shaping can never make known data vanish.
 ## Title line, labels, and readouts
 
 ```
-BATTERY                 SoC 72% ↓  12.4 W 😎
-0h48             ▁▂▂▂▂▂▂▂▃▃▃▃▃▃▃│⣀          3h10 ~18:20
-start            ███████████████│⣿⣿⣷⣶⣦⣤⣀⣀⣀⣀ empty
-      ──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬─
-        07 08 09 10 11 12 13 14 15 16 17 18   SoH 94.3%
+BATTERY                         12.4W ↓ 72% P
+                    ▁▂▂▂▂▂▂▂▃▃▃▃▃▃▃│⣀
+0h48m               ███████████████│⣿⣿              3h10m
+start               ███████████████│⣿⣿⣷⣶⣦⣤⣀⣀⣀     empty
+      ──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬
+SoH   03 04 05 06 07 08 09 10 11 12 13 14 15 16 17
+94.3% Sun 6 Sep 2026 06:07 · (1m) refresh in 47s
 ```
 
 Here the ETA needs ten columns of forecast, so `NOW` sits ten from the right.
@@ -148,27 +154,28 @@ Records only reach back about five hours, so the columns further left than that
 stay blank — nothing is invented to fill them.
 
 - **Title:** `BATTERY` (`render_dashboard(heading=…)`, `SIMULATION` for the
-  `simulate` facility), then `SoC N%`, then the direction arrow (`↑` charging,
-  `↓` discharging, `·` idle) above NOW, then power. Power is `-- W` when
-  unavailable, `X.X W` for a direct reading, `~X.X W` for a time-derived
-  estimate. A power profile, when known, follows as an emoji face:
-  🥵 performance, 😎 balanced, 😴 power-saver (`graph.POWER_PROFILE_FACES`).
-  The face is one code point but two terminal cells wide, which the title
-  layout accounts for; a missing or unrecognized profile shows no face.
+  `simulate` facility), then wattage, the direction arrow (`↑` charging,
+  `↓` discharging, `·` idle) above NOW, percentage, and an optional one-cell
+  `P`. Power is `--W` when unavailable, `X.XW` for a direct reading, and
+  `~X.XW` for a time-derived estimate. Every displayed token is separated by
+  exactly one blank. The `P` uses xterm 238 (power-saver), 244 (balanced), or
+  252 (performance).
 - **Left of the graph rows:** time since the current session started
   (`format_duration`), with the label `start` under it. Blank when no session
   is open.
-- **Right of the graph rows:** the ETA — remaining time and predicted clock
-  time (`~HH:MM`) — with the label `full` (charging) or `empty` (discharging)
-  under it. `--` when there is no estimate.
+- **Right of the graph rows:** the ETA duration, with the label `full`
+  (charging) or `empty` (discharging)
+  under it. A compatible persisted session with no estimate shows `n/a`; an
+  immediate live direction change shows `--` until compatible persisted ETA
+  data arrives, so the opposite-direction ETA is never retained.
 - **Axis:** hourly `┬` ticks with two-digit hour labels, in local time.
-- **SoH:** `SoH X.X%` at the end of the label line, shown only when a
+- **SoH:** `SoH` at the far left of the time-label row and `X.X%` directly below
+  it on the footer row, both in xterm 244, shown only when a
   State-of-Health value could be resolved (see
   [history-model.md](history-model.md#health--soh-event-storage)).
 
 ## `--unicode-probe`
 
 `battery-status-tui --unicode-probe` prints the solid, Braille, joining,
-power-profile, and axis glyphs the renderer uses, so you can check your terminal
-font renders them
-before relying on the graph.
+power-profile labels, and axis glyphs the renderer uses, so you can check your
+terminal font renders them before relying on the graph.

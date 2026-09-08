@@ -67,16 +67,12 @@ class RecentSeriesTests(unittest.TestCase):
             encode_recent_series((point(1_000_000),
                                   point(1_000_000 + MAX_WINDOW_MS + 1)))
 
-    def test_retention_window_backs_the_widest_graph_history_span(self):
-        # The widest dynamic-NOW viewport draws MAX_SPAN_SECONDS of history;
-        # because 20-minute columns snap to absolute clock boundaries its
-        # leftmost column can begin up to one COLUMN_SECONDS before
-        # now - MAX_SPAN_SECONDS. recent_series must retain at least that far
-        # back so every visible history column is backed by real samples.
+    def test_retention_window_covers_graph_and_alignment_margin(self):
         from battery_status_tui.graph import COLUMN_SECONDS, MAX_SPAN_SECONDS
 
-        self.assertGreaterEqual(MAX_WINDOW_MS,
-                                (MAX_SPAN_SECONDS + COLUMN_SECONDS) * 1_000)
+        self.assertEqual(MAX_WINDOW_MS, 16 * 60 * 60 * 1_000)
+        self.assertEqual(MAX_WINDOW_MS,
+                         (MAX_SPAN_SECONDS + COLUMN_SECONDS) * 1_000)
 
     def test_encoder_rejects_non_finite_energy_and_invalid_enums(self):
         for value in (math.nan, math.inf, -math.inf):

@@ -62,8 +62,8 @@ class CliTests(unittest.TestCase):
             intervals = storage.sleep_intervals_since(post.timestamp - 6 * 3600)
             history = storage.samples_since(post.timestamp - 6 * 3600)
             marker = now_column(current, None)
-            top, bottom, _ = _chart_rows_and_percentages(current, history, None,
-                                                         post.timestamp, intervals)
+            top, middle, bottom, _ = _chart_rows_and_percentages(current, history, None,
+                                                                post.timestamp, intervals)
 
         self.assertEqual(len(intervals), 1)
         self.assertEqual((intervals[0].pre_percentage, intervals[0].post_percentage), (67, 67))
@@ -71,10 +71,11 @@ class CliTests(unittest.TestCase):
         self.assertEqual(len(columns), 14)
         self.assertTrue(all(column < marker for column in columns))
         self.assertTrue(all(0x2800 <= ord(character) <= 0x28ff
-                            for column in columns for character in (top[column], bottom[column])
+                            for column in columns
+                            for character in (top[column], middle[column], bottom[column])
                             if character != " "))
         self.assertEqual(marker, GRAPH_WIDTH - 1)  # no forecast -> NOW at the right edge
-        self.assertEqual((top[marker], bottom[marker]), ("│", "│"))
+        self.assertEqual((top[marker], middle[marker], bottom[marker]), ("│", "│", "│"))
         self.assertIsNone(current.power_w)
 
     def test_clock_resume_handles_short_sleep_and_ignores_no_gap_or_replacement(self):

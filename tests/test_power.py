@@ -10,6 +10,25 @@ def raw(timestamp=300, state="discharging", **values):
     return RawBatterySnapshot(timestamp=timestamp, **defaults)
 
 class PowerResolverTests(unittest.TestCase):
+    def test_direct_resolver_excludes_upower_and_counter_delta(self):
+        current = raw(upower_energy_rate_w=13, energy_now_wh=19.8)
+        previous = raw(timestamp=100, monotonic_s=100, energy_now_wh=20)
+        reading = PowerResolver().resolve_sysfs_direct(current)
+        self.assertEqual((reading.watts, reading.method), (None, "unavailable"))
+        self.assertEqual(PowerResolver().resolve(current, [previous]).method,
+                         "upower-energy-rate")
+
+    def test_direct_invalid_power_now_uses_current_voltage(self):
+        reading = PowerResolver().resolve_sysfs_direct(
+            raw(power_now_w=1000, current_now_a=.5, voltage_now_v=12))
+        self.assertEqual((reading.watts, reading.method), (6, "current-voltage"))
+        self.assertFalse(reading.approximate)
+
+    def test_direct_active_zero_remains_raw_evidence(self):
+        direct = PowerResolver().resolve_sysfs_direct(raw(power_now_w=0))
+        self.assertEqual((direct.watts, direct.method), (0, "power-now"))
+        self.assertIsNone(PowerResolver().resolve(raw(power_now_w=0)).watts)
+
     def test_source_priority(self):
         reading = PowerResolver().resolve(raw(power_now_w=9, current_now_a=1, voltage_now_v=12, upower_energy_rate_w=13))
         self.assertEqual((reading.watts, reading.method), (9, "power-now"))

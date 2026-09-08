@@ -3,7 +3,8 @@ from __future__ import annotations
 import re
 import subprocess
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from enum import Enum
 from pathlib import Path
 from typing import Callable
 from .models import Measurement, RawBatterySnapshot
@@ -11,6 +12,23 @@ from .power import PowerResolver
 
 class SourceUnavailable(RuntimeError):
     pass
+
+class FieldStatus(str, Enum):
+    ABSENT = "absent"
+    VALUE = "value"
+    ERROR = "error"
+    INVALID = "invalid"
+
+@dataclass(frozen=True, slots=True)
+class FieldOutcome:
+    status: FieldStatus
+    value: float | str | None = None
+    error: str | None = None
+
+@dataclass(frozen=True, slots=True)
+class SysfsObservation:
+    snapshots: tuple[RawBatterySnapshot, ...]
+    battery_fields: dict[str, dict[str, FieldOutcome]]
 
 def _number(value: str | None) -> float | None:
     match = re.search(r"-?[0-9]+(?:\.[0-9]+)?", value or "")
@@ -37,6 +55,20 @@ def _read(path: Path) -> str | None:
 def _micro(path: Path) -> float | None:
     value = _number(_read(path))
     return value / 1_000_000 if value is not None else None
+
+def _observe(path: Path, *, micro: bool = False) -> FieldOutcome:
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return FieldOutcome(FieldStatus.ABSENT)
+    except OSError as error:
+        return FieldOutcome(FieldStatus.ERROR, error=f"{type(error).__name__}: {error}")
+    if not text:
+        return FieldOutcome(FieldStatus.INVALID)
+    value = _number(text)
+    if value is None:
+        return FieldOutcome(FieldStatus.INVALID)
+    return FieldOutcome(FieldStatus.VALUE, value / 1_000_000 if micro else value)
 
 def _boot_id() -> str:
     return _read(Path("/proc/sys/kernel/random/boot_id")) or "unknown"
@@ -147,6 +179,9 @@ class SysfsSource:
         self._identities: dict[str, tuple[str, str, str]] = {}
 
     def read_raw(self, now: int | None = None) -> tuple[RawBatterySnapshot, ...]:
+        return self.read_observed(now).snapshots
+
+    def read_observed(self, now: int | None = None) -> SysfsObservation:
         timestamp, (mono, boot) = int(time.time()) if now is None else now, _clocks()
         try:
             supplies = list(self.root.iterdir())
@@ -162,18 +197,29 @@ class SysfsSource:
         online_values = [_read(item / "online") for item in mains]
         online = None if not online_values else any(value == "1" for value in online_values)
         snapshots = []
+        observed: dict[str, dict[str, FieldOutcome]] = {}
         for battery in sorted(batteries):
-            percentage = _number(_read(battery / "capacity"))
-            if percentage is None:
+            fields = {
+                name: _observe(battery / name, micro=name in {
+                    "power_now", "current_now", "voltage_now",
+                })
+                for name in ("capacity", "power_now", "current_now", "voltage_now")
+            }
+            observed[battery.name] = fields
+            percentage_outcome = fields["capacity"]
+            if percentage_outcome.status is not FieldStatus.VALUE:
                 continue
+            percentage = float(percentage_outcome.value)
             identity = _stable_identity(
                 self._identities, battery.name, _read(battery / "model_name"),
                 _read(battery / "serial_number"),
             )
             cycle = _number(_read(battery / "cycle_count"))
             snapshots.append(RawBatterySnapshot(timestamp, mono, boot, _boot_id(), battery.name, identity, percentage,
-                _state(_read(battery / "status")), online, power_now_w=_micro(battery / "power_now"),
-                current_now_a=_micro(battery / "current_now"), voltage_now_v=_micro(battery / "voltage_now"),
+                _state(_read(battery / "status")), online,
+                power_now_w=float(fields["power_now"].value) if fields["power_now"].status is FieldStatus.VALUE else None,
+                current_now_a=float(fields["current_now"].value) if fields["current_now"].status is FieldStatus.VALUE else None,
+                voltage_now_v=float(fields["voltage_now"].value) if fields["voltage_now"].status is FieldStatus.VALUE else None,
                 energy_now_wh=_micro(battery / "energy_now"), energy_full_wh=_micro(battery / "energy_full"),
                 energy_full_design_wh=_micro(battery / "energy_full_design"), charge_now_ah=_micro(battery / "charge_now"),
                 charge_full_ah=_micro(battery / "charge_full"), charge_full_design_ah=_micro(battery / "charge_full_design"),
@@ -183,14 +229,16 @@ class SysfsSource:
                 voltage_design_v=_micro(battery / "voltage_min_design")))
         if not snapshots:
             raise SourceUnavailable("sysfs found no system battery")
-        return tuple(snapshots)
+        return SysfsObservation(tuple(snapshots), observed)
 
     def read(self, now: int | None = None) -> Measurement:
         return aggregate(self.read_raw(now), PowerResolver())
 
 def aggregate(raw: tuple[RawBatterySnapshot, ...], resolver: PowerResolver,
-              history: tuple[RawBatterySnapshot, ...] = (), sleep_intervals: tuple[tuple[int, int], ...] = ()) -> Measurement:
-    readings = [resolver.resolve(item, history, sleep_intervals) for item in raw]
+              history: tuple[RawBatterySnapshot, ...] = (), sleep_intervals: tuple[tuple[int, int], ...] = (),
+              *, direct_only: bool = False) -> Measurement:
+    readings = [resolver.resolve_sysfs_direct(item) if direct_only else
+                resolver.resolve(item, history, sleep_intervals) for item in raw]
     powers = [reading.watts for reading in readings]
     power = sum(value for value in powers if value is not None) if all(value is not None for value in powers) else None
     full = [item.energy_full_wh or ((item.charge_full_ah or 0) * (item.voltage_now_v or 0)) for item in raw]

@@ -12,12 +12,9 @@ from typing import Sequence
 
 MAGIC = b"BRS1"
 FORMAT_VERSION = 1
-# Fine-grained sub-hour retention: the widest dynamic history viewport the
-# dashboard can draw (12 h) plus one 20-minute graph bucket, so the leftmost
-# visible column — which may begin just before now - 12 h because columns are
-# aligned to absolute clock boundaries — is still backed by real samples.
-# Older sub-hour shape lives only in the permanent hourly_history aggregates.
-MAX_WINDOW_MS = 12 * 60 * 60 * 1_000 + 20 * 60 * 1_000
+# Fine-grained retention covers the 15 h 40 m graph plus one 20-minute
+# clock-alignment margin. Hourly aggregates are never treated as sub-hour data.
+MAX_WINDOW_MS = 16 * 60 * 60 * 1_000
 UNKNOWN_POWER_MW = -(2 ** 31)
 UNKNOWN_PROFILE_INDEX = 0xFF
 

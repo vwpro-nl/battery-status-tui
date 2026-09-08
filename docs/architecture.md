@@ -25,9 +25,10 @@ truth. Instead it records:
    needed to resume accounting after a restart or crash, including the
    sub-hour history not yet folded into an hourly row.
 
-Everything the dashboard shows is reconstructed from these three: finalized
-hours give the older history, the checkpoint's `recent_series` gives the
-current hour, and the checkpoint's per-battery snapshot gives "now".
+The dashboard uses the checkpoint's retained `recent_series` for graph history
+and its per-battery snapshot for persisted "now". Finalized hours remain the
+canonical long-term accounting record, but are not expanded into synthetic
+20-minute graph observations.
 
 ## Tables
 
@@ -120,21 +121,18 @@ counts match the header's declared counts.
 ## `recent_series`: temporary, recoverable sub-hour state
 
 `recent_series` is a compact binary blob (`recent_series.py`, magic `BRS1`)
-stored inside each checkpoint generation. It holds up to the last **12 hours and
-20 minutes** (`MAX_WINDOW_MS`, and at most 65 535) of poll points: timestamp,
+stored inside each checkpoint generation. It holds up to the last **16 hours**
+(`MAX_WINDOW_MS`, and at most 65 535) of poll points: timestamp,
 SoC (millipercent), resolved power (mW), a compatible energy delta, battery
 state, active profile, battery set, and a `flags` word (AC state, power method,
 approximate bit, confidence, and a *break-before* bit marking a discontinuity).
 
-It is "temporary" in the sense that once a UTC hour closes, that hour's points
-are folded into an immutable `hourly_history` row and are no longer needed for
-correctness — but the still-open hour lives only here until it is finalized.
-Losing the newest checkpoint therefore costs at most the current partial hour,
-and recovery falls back to an older generation that still covers it. The window
-is sized to the widest history the dashboard can draw — 12 h of dynamic-`NOW`
-viewport plus one 20-minute column of clock-alignment slack — so every visible
-history column is backed by real sub-hour samples; anything older is served from
-the permanent `hourly_history` aggregates.
+Closed UTC hours are also folded into immutable `hourly_history` rows for
+genuinely hourly statistics, while their fine-grained points remain temporarily
+available for graphing. The 16 h window covers the dashboard's 15 h 40 m
+maximum span plus one 20-minute clock-alignment margin. `hourly_history`
+aggregates are never reconstructed into pseudo-20-minute graph samples; a graph
+bucket without a retained poll remains blank.
 
 Decoding is strict: any structural violation (non-increasing timestamps, window
 past `MAX_WINDOW_MS`, out-of-range enum, dictionary not canonical, length

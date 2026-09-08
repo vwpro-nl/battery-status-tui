@@ -17,11 +17,13 @@ import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, redirect_stderr, redirect_stdout
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
 from battery_status_tui import cli
 from battery_status_tui.graph import GRAPH_OFFSET, NOW_INDEX
+from battery_status_tui.live import LiveReading
 from battery_status_tui.models import Measurement, RawBatterySnapshot
 from battery_status_tui.power import PowerResolver
 from battery_status_tui.recent_series import decode_recent_series
@@ -119,6 +121,39 @@ class _NoProfile:
         pass
 
 
+class FakeLiveSampler:
+    def __init__(self, readings=()) -> None:
+        self.readings = list(readings)
+        self.polls = 0
+
+    def poll(self):
+        self.polls += 1
+        return self.readings.pop(0) if self.readings else None
+
+
+def live_reading(*, soc: float, state: str, ac: bool | None,
+                 power: float | None, epoch: int = 0) -> LiveReading:
+    moment = 1_800_000_000
+    raw_battery = RawBatterySnapshot(
+        moment, float(moment), float(moment), BOOT, "BAT0",
+        "BAT0|Primary|SER123", soc, state, ac,
+        power_now_w=power, sources=("sysfs",),
+    )
+    raw = Measurement(
+        moment, soc, state, ac, power_w=power,
+        power_method="power-now" if power is not None else "unavailable",
+        monotonic_s=float(moment), boottime_s=float(moment), boot_id=BOOT,
+        battery_identity=raw_battery.identity, raw_batteries=(raw_battery,),
+    )
+    display = raw if power is not None else replace(
+        raw, power_w=None, power_method="unavailable",
+    )
+    return LiveReading(
+        raw, display, power_epoch=epoch,
+        power_observation_at=float(moment) if power is not None else None,
+    )
+
+
 def make_v4_db(path: Path) -> None:
     V1Storage(path).initialize_writer()
 
@@ -132,6 +167,8 @@ def run_cli(args: list[str], source: FakeSource,
             clock: FakeClock | None = None, *, stop_after_polls: int | None = None,
             forbid_collector_components: bool = False,
             after_view=None,
+            live_sampler=None,
+            forbid_live_sampler: bool = False,
             ) -> tuple[int, str]:
     buffer = io.StringIO()
     if forbid_collector_components:
@@ -153,15 +190,21 @@ def run_cli(args: list[str], source: FakeSource,
         patches.append(patch("battery_status_tui.cli.time.time", clock.time))
         patches.append(patch("battery_status_tui.cli.time.monotonic", clock.time))
         patches.append(patch("battery_status_tui.cli.time.sleep", clock.sleep))
+    if forbid_live_sampler:
+        patches.append(patch("battery_status_tui.cli.LiveSampler",
+                             side_effect=AssertionError("non-interactive path created LiveSampler")))
+    else:
+        patches.append(patch("battery_status_tui.cli.LiveSampler",
+                             return_value=live_sampler or FakeLiveSampler()))
     if stop_after_polls is not None:
         # Drive the real interactive loop, then interrupt it (as Ctrl-C would)
         # once it has completed the requested number of read-only redraws.
-        real_render = cli._render_v4_view
+        real_load = cli._load_v4_view
         seen = [0]
 
-        def counting_render(*a, **kw):
+        def counting_load(*a, **kw):
             try:
-                return real_render(*a, **kw)
+                return real_load(*a, **kw)
             finally:
                 seen[0] += 1
                 if after_view is not None:
@@ -169,7 +212,7 @@ def run_cli(args: list[str], source: FakeSource,
                 if seen[0] >= stop_after_polls:
                     os.kill(os.getpid(), signal.SIGINT)
 
-        patches.append(patch("battery_status_tui.cli._render_v4_view", counting_render))
+        patches.append(patch("battery_status_tui.cli._load_v4_view", counting_load))
     with redirect_stdout(buffer), redirect_stderr(buffer):
         if stop_after_polls is not None:
             buffer.isatty = lambda: True  # force the interactive loop
@@ -245,7 +288,28 @@ class V4CliRuntimeTests(unittest.TestCase):
         graph_rows = rendered.splitlines()[1:3]
         right = "".join(row[GRAPH_OFFSET + NOW_INDEX + 1:] for row in graph_rows)
         self.assertTrue(any(0x2800 <= ord(char) <= 0x28FF for char in right))
-        self.assertIn("2h00 ~", rendered)
+        self.assertIn("2h00m", rendered)
+        self.assertNotIn("~", rendered)
+        self.assertIn("(1m) refresh in", rendered)
+        self.assertNotIn("Ctrl-C", rendered)
+
+    def test_once_does_not_create_live_sampler(self) -> None:
+        self.poll_once(FakeSource())
+        code, out = run_cli(
+            ["--database", str(self.path), "--once"], FakeSource(), self.clock,
+            forbid_collector_components=True, forbid_live_sampler=True,
+        )
+        self.assertEqual(code, 0, out)
+
+    def test_once_footer_uses_configured_interval(self) -> None:
+        self.poll_once(FakeSource())
+        code, out = run_cli(
+            ["--database", str(self.path), "--once", "--interval", "120"],
+            FakeSource(), self.clock, forbid_collector_components=True,
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("(2m) refresh in", plain(out))
+        self.assertNotIn("(1m)", plain(out))
 
     def test_diagnose_reads_v4_and_writes_no_checkpoint(self) -> None:
         self.assertFalse(self.path.exists())
@@ -353,7 +417,7 @@ class V4CliRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(code, 0)
         self.assertIn("waiting for first sample", out)
-        self.assertIn("SoC 63%", out)
+        self.assertIn("↑ 63%", plain(out))
 
     def test_interactive_view_recovers_when_timer_refreshes_stale_checkpoint(self) -> None:
         V1Collector(V1Storage(self.path)).process_poll(
@@ -374,7 +438,112 @@ class V4CliRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(code, 0)
         self.assertIn("stale data (last sample", out)
-        self.assertIn("SoC 64%", out)
+        self.assertIn("↑ 64%", plain(out))
+
+    def test_display_heartbeat_does_not_reread_history(self) -> None:
+        V1Collector(V1Storage(self.path)).process_poll(
+            _measurement_at(FakeSource(soc=61), int(self.clock.time()))
+        )
+        renders = [0]
+        origin = [None]
+        real_sleep = self.clock.sleep
+
+        def after_view(count: int) -> None:
+            renders[0] = count
+            if origin[0] is None:
+                origin[0] = self.clock.now
+
+        def sleep_and_stop(seconds: float) -> None:
+            real_sleep(seconds)
+            if origin[0] is not None and self.clock.now - origin[0] >= 5:
+                os.kill(os.getpid(), signal.SIGINT)
+
+        self.clock.sleep = sleep_and_stop
+        live_sampler = FakeLiveSampler()
+        code, out = run_cli(
+            ["--database", str(self.path), "--interval", "60"], FakeSource(),
+            self.clock, stop_after_polls=99, forbid_collector_components=True,
+            after_view=after_view, live_sampler=live_sampler,
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(renders[0], 1)
+        self.assertIn("↑ 61%", plain(out))
+        self.assertNotIn("Ctrl-C", out)
+        countdowns = [int(value) for value in re.findall(r"refresh in (\d+)s", out)]
+        self.assertGreaterEqual(len(set(countdowns)), 2)
+        self.assertGreater(max(countdowns), min(countdowns))
+        self.assertGreaterEqual(live_sampler.polls, 5)
+
+    def test_interactive_viewer_applies_live_title_overlay(self) -> None:
+        V1Collector(V1Storage(self.path)).process_poll(
+            _measurement_at(FakeSource(soc=61, state="charging", ac=True),
+                            int(self.clock.time()))
+        )
+        moment = int(self.clock.time())
+        live_raw = Measurement(
+            moment, 42, "discharging", False, power_w=7.5,
+            power_method="power-now", monotonic_s=float(moment),
+            boottime_s=float(moment), boot_id=BOOT,
+            battery_identity="BAT0|Primary|SER123",
+            raw_batteries=(RawBatterySnapshot(
+                moment, float(moment), float(moment), BOOT, "BAT0",
+                "BAT0|Primary|SER123", 42, "discharging", False,
+                power_now_w=7.5, sources=("sysfs",),
+            ),),
+        )
+        live_sampler = FakeLiveSampler([LiveReading(
+            live_raw, live_raw, power_observation_at=float(moment),
+        )])
+        code, out = run_cli(
+            ["--database", str(self.path), "--interval", "60"], FakeSource(),
+            self.clock, stop_after_polls=1, forbid_collector_components=True,
+            live_sampler=live_sampler,
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("7.5W ↓ 42%", plain(out))
+        self.assertNotIn("27.0W /", plain(out))
+        self.assertEqual(live_sampler.polls, 1)
+
+    def test_live_transitions_redraw_without_persisted_reload(self) -> None:
+        V1Collector(V1Storage(self.path)).process_poll(
+            _measurement_at(FakeSource(soc=61, state="charging", ac=True),
+                            int(self.clock.time()))
+        )
+        readings = [
+            live_reading(soc=61, state="charging", ac=True, power=12.4),
+            live_reading(soc=61, state="not charging", ac=True, power=None, epoch=1),
+            live_reading(soc=61, state="not charging", ac=True, power=0, epoch=1),
+            live_reading(soc=61, state="discharging", ac=False, power=None, epoch=2),
+            live_reading(soc=61, state="discharging", ac=False, power=7.2, epoch=2),
+        ]
+        sampler = FakeLiveSampler(readings)
+        loads = [0]
+        origin = [None]
+        real_sleep = self.clock.sleep
+
+        def after_view(count: int) -> None:
+            loads[0] = count
+            if origin[0] is None:
+                origin[0] = self.clock.now
+
+        def sleep_and_stop(seconds: float) -> None:
+            real_sleep(seconds)
+            if origin[0] is not None and self.clock.now - origin[0] >= 5:
+                os.kill(os.getpid(), signal.SIGINT)
+
+        self.clock.sleep = sleep_and_stop
+        code, out = run_cli(
+            ["--database", str(self.path), "--interval", "60"], FakeSource(),
+            self.clock, stop_after_polls=99, forbid_collector_components=True,
+            after_view=after_view, live_sampler=sampler,
+        )
+        rendered = plain(out)
+        self.assertEqual(code, 0)
+        self.assertEqual(loads[0], 1)
+        self.assertIn("12.4W ↑ 61%", rendered)
+        self.assertIn("--W · 61%", rendered)
+        self.assertIn("0.0W · 61%", rendered)
+        self.assertIn("7.2W ↓ 61%", rendered)
 
     def test_interactive_redraw_reads_new_timer_checkpoint(self) -> None:
         initial = FakeSource(soc=61)
@@ -396,8 +565,8 @@ class V4CliRuntimeTests(unittest.TestCase):
             after_view=timer_after_first_view,
         )
         self.assertEqual(code, 0)
-        self.assertIn("SoC 61%", out)
-        self.assertIn("SoC 77%", out)
+        self.assertIn("↑ 61%", plain(out))
+        self.assertIn("↑ 77%", plain(out))
 
     def test_multiple_concurrent_view_reads_are_harmless(self) -> None:
         self.poll_once(FakeSource())

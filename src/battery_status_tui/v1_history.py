@@ -18,17 +18,11 @@ from .recent_series import (
     decode_recent_series,
 )
 from .system_status import HealthReading, resolve_health
-from .v1_hourly import HOUR_MS, HourlyAccumulator
+from .v1_hourly import HourlyAccumulator
 from .v1_storage import GenerationSnapshot, V1Storage, V1StorageError
 
 
 BREAK_BEFORE = 0x0100
-# A finalized hour may miss a poll or two (well under the 180 s unknown-gap
-# threshold) yet still hold a continuous SoC trajectory. Render its two endpoint
-# samples when at least this much of the hour was observed; hours with real
-# sleep or a wide unknown span drop below it and stay blank / owned by the
-# sleep-interval path.
-NEAR_COMPLETE_OBSERVED_MS = HOUR_MS - 5 * 60_000
 METHODS = {
     0: "unavailable",
     1: "power-now",
@@ -52,6 +46,14 @@ class V1HistoryError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class CompletedChargeEvidence:
+    started_at: int
+    completed_at: int
+    boot_id: str
+    battery_set_key: str
+
+
+@dataclass(frozen=True, slots=True)
 class V1HistorySnapshot:
     current: Measurement
     history: tuple[Measurement, ...]
@@ -65,6 +67,7 @@ class V1HistorySnapshot:
     generation: int
     configured_interval_ms: int
     warnings: tuple[str, ...]
+    completed_charge: CompletedChargeEvidence | None = None
 
 
 def _ac_state(flags: int) -> bool | None:
@@ -132,20 +135,6 @@ def _point_measurement(point: RecentPoint, snapshot: GenerationSnapshot,
     )
 
 
-def _hour_state(row: sqlite3.Row) -> tuple[str, bool | None]:
-    states = (
-        ("charging", int(row["charging_ms"])),
-        ("discharging", int(row["discharging_ms"])),
-        ("full", int(row["full_ms"])),
-        ("other", int(row["other_state_ms"])),
-    )
-    state = max(states, key=lambda item: item[1])[0]
-    ac_values = ((True, int(row["ac_online_ms"])),
-                 (False, int(row["ac_offline_ms"])),
-                 (None, int(row["ac_unknown_ms"])))
-    return state, max(ac_values, key=lambda item: item[1])[0]
-
-
 class V1History:
     """Expose schema-v4 state without writing or migrating the database."""
 
@@ -169,6 +158,7 @@ class V1History:
                 effective_now = current.timestamp if now is None else now
                 history = self._history(db, since, effective_now, recent)
                 session = self._current_session(db)
+                completed_charge = self._completed_charge(db, snapshot, points[-1])
                 sleeps = self._sleeps(db, since)
                 health = self._health(db, snapshot)
                 trend = self._trend(points, snapshot, batteries, session, since)
@@ -178,6 +168,7 @@ class V1History:
                     snapshot.power_profile, snapshot.hourly, profiles, snapshot.generation,
                     snapshot.configured_interval_ms,
                     recovery.warnings,
+                    completed_charge,
                 )
         except (sqlite3.Error, V1StorageError) as error:
             raise V1HistoryError(str(error)) from error
@@ -241,31 +232,9 @@ class V1History:
     @staticmethod
     def _history(db: sqlite3.Connection, since: int, now: int,
                  recent: tuple[Measurement, ...]) -> tuple[Measurement, ...]:
-        recent_hours = {sample.timestamp * 1_000 // HOUR_MS * HOUR_MS for sample in recent}
-        rows = db.execute(
-            "SELECT * FROM hourly_history WHERE hour_start_ms<? AND hour_start_ms+3600000>? "
-            "ORDER BY hour_start_ms", (now * 1_000, since * 1_000),
-        ).fetchall()
-        hourly = []
-        for row in rows:
-            hour = int(row["hour_start_ms"])
-            if hour in recent_hours or int(row["observed_ms"]) < NEAR_COMPLETE_OBSERVED_MS:
-                continue
-            if row["soc_start"] is None or row["soc_end"] is None:
-                continue
-            state, ac_online = _hour_state(row)
-            for timestamp, percentage in (
-                (hour // 1_000, float(row["soc_start"])),
-                ((hour + HOUR_MS - 1) // 1_000, float(row["soc_end"])),
-            ):
-                if since <= timestamp < now:
-                    hourly.append(Measurement(
-                        timestamp, percentage, state, ac_online,
-                        source="hourly-history", device="system-batteries",
-                        battery_identity=row["battery_set_key"],
-                    ))
-        combined = hourly + [sample for sample in recent if since <= sample.timestamp < now]
-        return tuple(sorted(combined, key=lambda sample: sample.timestamp))
+        # Hourly aggregates cannot truthfully supply 20-minute graph values.
+        # Keep gaps blank until genuine fine-grained samples have accumulated.
+        return tuple(sample for sample in recent if since <= sample.timestamp < now)
 
     @staticmethod
     def _current_session(db: sqlite3.Connection) -> Session | None:
@@ -275,6 +244,38 @@ class V1History:
         return None if row is None else Session(
             int(row["id"]), str(row["kind"]), int(row["started_at_ms"]) // 1_000,
             None, float(row["start_soc"]), None,
+        )
+
+    @staticmethod
+    def _completed_charge(db: sqlite3.Connection, snapshot: GenerationSnapshot,
+                          current: RecentPoint) -> CompletedChargeEvidence | None:
+        states = {item.state for item in snapshot.batteries if item.present}
+        if snapshot.ac_online is not True or states != {"full"}:
+            return None
+        row = db.execute(
+            "SELECT kind,started_at_ms,ended_at_ms,battery_set_key,end_reason,end_soc "
+            "FROM sessions ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if (row is None or row["kind"] != "charging" or row["ended_at_ms"] is None
+                or row["end_reason"] != "full" or row["end_soc"] != 100
+                or row["battery_set_key"] != current.battery_set_key):
+            return None
+        start_event = db.execute(
+            "SELECT 1 FROM state_events WHERE occurred_at_ms=? AND boot_id=? "
+            "AND scope='battery' AND battery_state='charging' LIMIT 1",
+            (int(row["started_at_ms"]), snapshot.boot_id),
+        ).fetchone()
+        end_event = db.execute(
+            "SELECT 1 FROM state_events WHERE occurred_at_ms=? AND boot_id=? "
+            "AND scope='battery' AND battery_state='full' LIMIT 1",
+            (int(row["ended_at_ms"]), snapshot.boot_id),
+        ).fetchone()
+        if start_event is None or end_event is None:
+            return None
+        return CompletedChargeEvidence(
+            int(row["started_at_ms"]) // 1_000,
+            int(row["ended_at_ms"]) // 1_000,
+            snapshot.boot_id, str(row["battery_set_key"]),
         )
 
     @staticmethod

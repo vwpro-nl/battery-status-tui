@@ -6,7 +6,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from battery_status_tui.graph import GRAPH_OFFSET, GRAPH_WIDTH, NOW_INDEX, chart_rows
+from battery_status_tui.graph import (
+    COLUMN_SECONDS, GRAPH_OFFSET, GRAPH_WIDTH, MAX_SPAN_SECONDS, NOW_INDEX,
+    _chart_rows_and_percentages, _history_column, chart_rows, now_column,
+)
 from battery_status_tui.models import Measurement, RawBatterySnapshot, SleepInterval
 from battery_status_tui.power import PowerResolver
 from battery_status_tui.schema import V2_CREATE_STATEMENTS
@@ -77,10 +80,12 @@ class V1HistoryTests(unittest.TestCase):
         self.collector.process_poll(sample(now), profile="balanced")
         output = plain(render_v1(self.storage, now=now))
         lines = output.splitlines()
-        self.assertEqual(len(lines), 5)
+        self.assertEqual(len(lines), 7)
         self.assertIn("BATTERY", lines[0])
-        self.assertIn("SoC 60% ↓  10.0 W 😎", lines[0])  # balanced -> emoji face
-        self.assertTrue(lines[4].endswith("SoH 62.5%"))
+        self.assertIn("10.0W ↓ 60% P", lines[0])
+        self.assertTrue(lines[0].endswith("P"))
+        self.assertTrue(lines[5].startswith("SoH"))
+        self.assertEqual(lines[6], "62.5%")
         # NOW separates solid history on the left from braille forecast on the right
         graph_top = lines[1][GRAPH_OFFSET:GRAPH_OFFSET + GRAPH_WIDTH]
         marker = graph_top.index("│")
@@ -98,6 +103,36 @@ class V1HistoryTests(unittest.TestCase):
         self.assertEqual(view.current.energy_wh, 39.9)
         self.assertEqual(view.hourly_accumulator.observed_ms, 60_000)
 
+    def test_completed_charge_evidence_uses_persisted_session_endpoint(self) -> None:
+        started = 10 * 3600
+        completed = started + 29 * 60
+        self.collector.process_poll(sample(
+            started, soc=80, state="charging", ac=True, energy=40,
+        ))
+        self.collector.process_poll(sample(
+            completed, soc=100, state="full", ac=True, energy=50,
+        ))
+        view = V1History(self.path).load(started - 60, now=completed)
+        self.assertIsNotNone(view.completed_charge)
+        self.assertEqual((view.completed_charge.started_at,
+                          view.completed_charge.completed_at,
+                          view.completed_charge.boot_id),
+                         (started, completed, "boot-a"))
+
+    def test_completed_charge_evidence_rejects_cross_boot_session(self) -> None:
+        started = 10 * 3600
+        completed = started + 29 * 60
+        self.collector.process_poll(sample(
+            started, soc=80, state="charging", ac=True, energy=40,
+            boot="old-boot",
+        ))
+        self.collector.process_poll(sample(
+            completed, soc=100, state="full", ac=True, energy=50,
+            boot="new-boot",
+        ))
+        view = V1History(self.path).load(started - 60, now=completed)
+        self.assertIsNone(view.completed_charge)
+
     def test_stale_checkpoint_still_supplies_current_without_fake_recent_history(self) -> None:
         timestamp = 2 * 3600
         self.collector.process_poll(sample(timestamp, soc=58))
@@ -106,15 +141,12 @@ class V1HistoryTests(unittest.TestCase):
         self.assertEqual(view.history, ())
         self.assertEqual(view.trend_history, ())
 
-    def test_finalized_hour_is_used_without_recent_series_double_counting(self) -> None:
+    def test_finalized_hour_stays_available_without_entering_graph_history(self) -> None:
         now = 10 * 3600
         self.collector.process_poll(sample(now))
         self.insert_hour(8 * HOUR_MS, profile="balanced")
         view = V1History(self.path).load(8 * 3600, now=now)
-        hourly = [item for item in view.history if item.source == "hourly-history"]
-        self.assertEqual(len(hourly), 2)
-        timestamps = [item.timestamp for item in view.history]
-        self.assertEqual(len(timestamps), len(set(timestamps)))
+        self.assertEqual(view.history, ())
         self.assertEqual(view.hourly_profiles, {8 * HOUR_MS: {"balanced": HOUR_MS}})
 
     def test_utc_boundary_never_combines_hourly_and_recent_for_same_hour(self) -> None:
@@ -126,18 +158,18 @@ class V1HistoryTests(unittest.TestCase):
         self.assertEqual(hour_zero[0].source, "checkpoint-recent-series")
         self.assertFalse(any(item.source == "hourly-history" for item in hour_zero))
 
-    def test_revised_finalized_hour_is_read_without_cache(self) -> None:
+    def test_revised_finalized_hour_does_not_enter_graph_history(self) -> None:
         now = 10 * 3600
         self.collector.process_poll(sample(now))
         self.insert_hour(8 * HOUR_MS, soc_start=70, soc_end=65)
         history = V1History(self.path)
-        self.assertEqual(history.load(8 * 3600, now=now).history[0].percentage, 70)
+        self.assertEqual(history.load(8 * 3600, now=now).history, ())
         with self.storage.transaction() as db:
             db.execute(
                 "UPDATE hourly_history SET revision=2,soc_start=69,soc_min=64 WHERE hour_start_ms=?",
                 (8 * HOUR_MS,),
             )
-        self.assertEqual(history.load(8 * 3600, now=now).history[0].percentage, 69)
+        self.assertEqual(history.load(8 * 3600, now=now).history, ())
 
     def test_continuity_break_starts_a_new_trend_segment(self) -> None:
         start = 10 * 3600
@@ -159,9 +191,10 @@ class V1HistoryTests(unittest.TestCase):
         now = start + 1200
         view = V1History(self.path).load(start - 1200, now=now)
         self.assertEqual(view.sleeps, (sleep,))
-        top, bottom = chart_rows(view.current, view.history, None, now, view.sleeps)
-        self.assertTrue(any(0x2800 <= ord(char) <= 0x28FF for char in top + bottom))
-        self.assertEqual((top[GRAPH_WIDTH - 1], bottom[GRAPH_WIDTH - 1]), ("│", "│"))
+        top, middle, bottom = chart_rows(view.current, view.history, None, now, view.sleeps)
+        self.assertTrue(any(0x2800 <= ord(char) <= 0x28FF for char in top + middle + bottom))
+        self.assertEqual((top[GRAPH_WIDTH - 1], middle[GRAPH_WIDTH - 1], bottom[GRAPH_WIDTH - 1]),
+                         ("│", "│", "│"))
         self.assertEqual([item.timestamp for item in view.trend_history], [start + 600])
 
     def test_partial_hourly_only_history_does_not_invent_subhour_points(self) -> None:
@@ -171,32 +204,118 @@ class V1HistoryTests(unittest.TestCase):
         view = V1History(self.path).load(8 * 3600, now=now)
         self.assertFalse(any(item.source == "hourly-history" for item in view.history))
 
-    def test_near_complete_hour_renders_in_the_wide_dynamic_viewport(self) -> None:
-        # A finalized hour that missed a couple of polls still holds a continuous
-        # SoC trajectory. In a no-forecast dynamic viewport (NOW at the right
-        # edge, up to 12 h of history) its low-SoC endpoints must reach the
-        # renderer instead of vanishing in the seam between the hourly layer and
-        # the 8 h recent_series. A barely-observed hour still stays blank.
-        from battery_status_tui.graph import _chart_rows_and_percentages, now_column
+    def test_observed_hourly_hour_does_not_create_graph_samples(self) -> None:
+        now = 10 * 3600
+        self.collector.process_poll(sample(now, soc=100, state="full", ac=True))
+        self.insert_hour(2 * HOUR_MS, soc_start=10, soc_end=40)
+        view = V1History(self.path).load(now - MAX_SPAN_SECONDS, now=now)
+        self.assertEqual(view.history, ())
 
+        marker = now_column(view.current, None)
+        columns = [
+            _history_column(2 * 3600, now, marker),
+            _history_column(2 * 3600 + COLUMN_SECONDS, now, marker),
+            _history_column(3 * 3600 - 1, now, marker),
+        ]
+        self.assertEqual(columns[1], columns[0] + 1)
+        self.assertEqual(columns[2], columns[0] + 2)
+        _, _, _, pct = _chart_rows_and_percentages(
+            view.current, view.history, None, now, view.sleeps)
+        self.assertEqual([pct[column] for column in columns], [None, None, None])
+
+    def test_recent_starting_mid_hour_populates_only_genuine_recent_cells(self) -> None:
+        now = 10 * 3600
+        self.collector.process_poll(sample(now, soc=80, state="charging", ac=True))
+        hour = 8 * HOUR_MS
+        self.insert_hour(hour, soc_start=49, soc_end=89)
+        recent_start = 8 * 3600 + 21 * 60
+        recent = []
+        timestamp = recent_start
+        while timestamp < 9 * 3600:
+            recent.append(Measurement(
+                timestamp, 95, "charging", True, source="checkpoint-recent-series",
+            ))
+            timestamp += 60
+        recent.append(Measurement(
+            now, 80, "charging", True, source="checkpoint-recent-series",
+        ))
+        with self.storage.reader() as db:
+            history = V1History._history(db, 8 * 3600, now, tuple(recent))
+        self.assertFalse(any(item.source == "hourly-history" for item in history))
+        recent_in_hour = [item for item in history
+                          if item.source == "checkpoint-recent-series"
+                          and 8 * 3600 <= item.timestamp < 9 * 3600]
+        self.assertGreater(len(recent_in_hour), 0)
+        self.assertTrue(all(item.timestamp >= recent_start for item in recent_in_hour))
+        self.assertFalse(any(
+            8 * 3600 + COLUMN_SECONDS <= item.timestamp < 9 * 3600
+            and item.source == "hourly-history"
+            for item in history
+        ))
+
+        current = sample(now, soc=80, state="charging", ac=True)
+        marker = now_column(current, None)
+        first = _history_column(8 * 3600, now, marker)
+        middle = _history_column(8 * 3600 + COLUMN_SECONDS, now, marker)
+        last = _history_column(9 * 3600 - 1, now, marker)
+        _, _, _, pct = _chart_rows_and_percentages(current, history, None, now)
+        self.assertIsNone(pct[first])
+        self.assertEqual(pct[middle], 95.0)
+        self.assertEqual(pct[last], 95.0)
+
+    def test_consecutive_hourly_hours_leave_graph_cells_blank(self) -> None:
+        now = 10 * 3600
+        self.collector.process_poll(sample(now, soc=100, state="full", ac=True))
+        self.insert_hour(2 * HOUR_MS, soc_start=10, soc_end=49)
+        self.insert_hour(3 * HOUR_MS, soc_start=49, soc_end=89)
+        view = V1History(self.path).load(now - MAX_SPAN_SECONDS, now=now)
+        marker = now_column(view.current, None)
+        columns = [
+            _history_column(2 * 3600, now, marker),
+            _history_column(2 * 3600 + COLUMN_SECONDS, now, marker),
+            _history_column(3 * 3600 - 1, now, marker),
+            _history_column(3 * 3600, now, marker),
+            _history_column(3 * 3600 + COLUMN_SECONDS, now, marker),
+            _history_column(4 * 3600 - 1, now, marker),
+        ]
+        self.assertEqual(columns, list(range(columns[0], columns[0] + 6)))
+        _, _, _, pct = _chart_rows_and_percentages(
+            view.current, view.history, None, now, view.sleeps)
+        values = [pct[column] for column in columns]
+        self.assertEqual(values, [None] * 6)
+
+    def test_genuine_missing_hourly_span_stays_blank(self) -> None:
+        now = 10 * 3600
+        self.collector.process_poll(sample(now, soc=100, state="full", ac=True))
+        self.insert_hour(2 * HOUR_MS, soc_start=10, soc_end=40)
+        # Hour 3 is absent: a real gap, not an unmapped observed hour.
+        self.insert_hour(4 * HOUR_MS, soc_start=50, soc_end=70)
+        view = V1History(self.path).load(now - MAX_SPAN_SECONDS, now=now)
+        marker = now_column(view.current, None)
+        _, _, _, pct = _chart_rows_and_percentages(
+            view.current, view.history, None, now, view.sleeps)
+        for timestamp in (3 * 3600, 3 * 3600 + COLUMN_SECONDS, 4 * 3600 - 1):
+            column = _history_column(timestamp, now, marker)
+            self.assertIsNotNone(column)
+            self.assertIsNone(pct[column])
+        self.assertIsNone(pct[_history_column(2 * 3600, now, marker)])
+        self.assertIsNone(pct[_history_column(4 * 3600, now, marker)])
+
+    def test_near_complete_hour_still_does_not_supply_subhour_data(self) -> None:
         now = 10 * 3600
         self.collector.process_poll(sample(now, soc=100, state="full", ac=True))
         self.insert_hour(2 * HOUR_MS, soc_start=6, soc_end=3,
                          observed_ms=HOUR_MS - 2 * 60 * 1000)          # 58 min observed
         self.insert_hour(3 * HOUR_MS, soc_start=3, soc_end=4,
                          observed_ms=HOUR_MS - 12 * 60 * 1000)         # 48 min observed
-        view = V1History(self.path).load(now - 12 * 3600, now=now)
+        view = V1History(self.path).load(now - MAX_SPAN_SECONDS, now=now)
 
-        by_source = {m.source for m in view.history}
-        self.assertIn("hourly-history", by_source)
-        near_complete = sorted(round(m.percentage) for m in view.history
-                               if m.source == "hourly-history")
-        self.assertEqual(near_complete, [3, 6])            # only the 58-min hour, not the 48-min one
+        self.assertEqual(view.history, ())
 
         marker = now_column(view.current, None)
         self.assertEqual(marker, GRAPH_WIDTH - 1)          # no forecast -> NOW at the right edge
-        _, _, pct = _chart_rows_and_percentages(view.current, view.history, None, now, view.sleeps)
-        self.assertTrue(any(p is not None and p <= 6 for p in pct[:marker]))  # low-SoC hour on screen
+        _, _, _, pct = _chart_rows_and_percentages(view.current, view.history, None, now, view.sleeps)
+        self.assertTrue(all(p is None for p in pct[:marker]))
 
     def test_health_profile_and_open_closed_sessions_come_from_v4(self) -> None:
         now = 10 * 3600
@@ -261,7 +380,8 @@ class V1HistoryTests(unittest.TestCase):
         graph_rows = output.splitlines()[1:3]
         right = "".join(row[GRAPH_OFFSET + NOW_INDEX + 1:] for row in graph_rows)
         self.assertTrue(any(0x2800 <= ord(char) <= 0x28FF for char in right))
-        self.assertIn("2h00 ~", output)
+        self.assertIn("2h00m", output)
+        self.assertNotIn("~", output)
 
     def test_read_only_view_does_not_change_database_rows(self) -> None:
         now = 10 * 3600

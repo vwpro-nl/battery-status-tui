@@ -13,9 +13,14 @@ from pathlib import Path
 
 from . import __version__
 from .estimate import estimate_remaining, smooth_seconds
-from .graph import COLUMN_SECONDS, CSI, MAX_SPAN_SECONDS, RESET, render_dashboard
+from .footer import frame_with_margins, parked_cursor
+from .graph import (
+    COLUMN_SECONDS, CSI, HISTORY_LOOKBACK_SECONDS, MAX_SPAN_SECONDS, RESET,
+    render_dashboard,
+)
 from .models import Estimate, Measurement, Session
 from .models import SleepInterval
+from .live import LiveReading, LiveSampler
 from .schema import V1_SCHEMA_VERSION
 from .sources import BatterySource, SourceUnavailable, aggregate
 from .storage import Storage, default_database_path
@@ -23,7 +28,10 @@ from .suspend import LogindMonitor, clock_sleep, journal_intervals
 from .system_status import HealthResolver, PowerProfileResolver
 from .v1_collector import V1CollectorError
 from .v1_history import V1History, V1HistoryError
-from .v1_runtime import collect_v1, read_v1_view, render_v1_view
+from .v1_runtime import (
+    CompletedChargeDisplay, WeightedLivePowerDisplay, collect_v1, read_v1_view,
+    render_v1_view,
+)
 from .v1_storage import V1Storage, V1StorageError
 
 
@@ -31,13 +39,35 @@ UNICODE_PROBE = """SOLID  : █ ▇ ▆ ▅ ▄ ▃ ▂ ▁
 BRAILLE: ⠀ ⠁ ⠂ ⠄ ⡀ ⢀ ⠒ ⠤ ⠦ ⠴
 JOIN   : ███▇▆▅│⠴⠦⠤⠒⠂⠁
 HEIGHT : ⠀ ⡀ ⣀ ⣄ ⣤ ⣦ ⣶ ⣿
-PROFILE: 🥵 😎 😴
+PROFILE: P
 AXIS   : ┬─────┬─────┬─────┬─────┬"""
+
+DISPLAY_HEARTBEAT = 1.0
+
 
 def next_refresh_delay(interval: float, wall_now: float) -> float:
     """Wake no later than the next wall-clock projection boundary."""
     next_projection = (int(wall_now) // COLUMN_SECONDS + 1) * COLUMN_SECONDS
     return min(max(1.0, interval), max(0.05, next_projection - wall_now + 0.05))
+
+
+def _frame_with_footer(body: str, now: float, interval: float, next_refresh_at: float) -> str:
+    """Fit the viewer to the current terminal with its horizontal margins."""
+    import shutil
+
+    size = shutil.get_terminal_size((80, 24))
+    return frame_with_margins(
+        body, now, interval, next_refresh_at, max(1, size.columns), max(1, size.lines),
+    )
+
+
+def _interactive_frame(output: str) -> str:
+    """Finish a repaint with the logical cursor inside the current pane."""
+    import shutil
+
+    width = max(1, shutil.get_terminal_size((80, 24)).columns)
+    return CSI + "2J" + CSI + "H" + output + parked_cursor(output, width)
+
 
 def reconcile_journal(storage: Storage, now: int, force: bool = False) -> None:
     checked = storage.metadata_int("journal-checked-at")
@@ -93,9 +123,9 @@ def render_once(source: BatterySource, storage: Storage, now: int | None = None,
     current = collect(source, storage, sample_timestamp)
     render_timestamp = int(time.time()) if now is None else now
     session = storage.current_session()
-    history = storage.samples_since(render_timestamp - MAX_SPAN_SECONDS)
+    history = storage.samples_since(render_timestamp - HISTORY_LOOKBACK_SECONDS)
     estimate = current_estimate(storage, current, sample_timestamp)
-    sleeps = storage.sleep_intervals_since(render_timestamp - MAX_SPAN_SECONDS)
+    sleeps = storage.sleep_intervals_since(render_timestamp - HISTORY_LOOKBACK_SECONDS)
     health = health_resolver.resolve(current.raw_batteries) if health_resolver else None
     profile = profile_resolver.resolve() if profile_resolver else None
     return render_dashboard(current, history, session, estimate, render_timestamp, sleeps,
@@ -159,6 +189,14 @@ def parser() -> argparse.ArgumentParser:
     mode.add_argument("--unicode-probe", action="store_true", help="show solid and Braille glyph candidates")
     result.add_argument("--interval", type=float, default=60, help="interactive refresh interval")
     result.add_argument("--database", type=Path, default=default_database_path(), help="SQLite history path")
+    result.add_argument("--power-decimals", type=int, default=1,
+                        help="decimal places in displayed power (default: 1)")
+    result.add_argument("--show-persisted-power", action="store_true",
+                        help="prepend persisted power for diagnostics")
+    result.add_argument("--show-weighted-power", action="store_true",
+                        help="append weighted live power for diagnostics")
+    result.add_argument("--weighted-power-samples", type=int, default=5,
+                        help="weighted live observation count (default: 5)")
     result.add_argument("--version", action="version", version=__version__)
     return result
 
@@ -191,6 +229,10 @@ class V1ViewUnavailable(V1HistoryError):
 
 
 def _render_v4_view(storage: V1Storage, now: int) -> str:
+    return render_v1_view(_load_v4_view(storage, now))
+
+
+def _load_v4_view(storage: V1Storage, now: int):
     guidance = "run battery-status-tui --sample or enable battery-status-tui.timer"
     if not storage.path.is_file():
         raise V1ViewUnavailable(f"waiting for first sample; {guidance}")
@@ -209,7 +251,7 @@ def _render_v4_view(storage: V1Storage, now: int) -> str:
         raise V1ViewUnavailable(
             f"stale data (last sample {timestamp}); {guidance}"
         )
-    return render_v1_view(view)
+    return view
 
 
 def _recovered_last_poll_second(storage: V1Storage) -> int:
@@ -300,9 +342,13 @@ def _run_v4(args: argparse.Namespace) -> int:
             print(f"battery-status-tui: {error}", file=sys.stderr)
             return 1
 
+    interval = max(1.0, args.interval)
     if args.once or not sys.stdout.isatty():
         try:
-            print(_render_v4_view(storage, int(time.time())))
+            now = time.time()
+            body = _render_v4_view(storage, int(now))
+            next_refresh_at = now + next_refresh_delay(interval, now)
+            print(_frame_with_footer(body, now, interval, next_refresh_at))
             return 0
         except (V1HistoryError, V1StorageError, sqlite3.Error) as error:
             print(f"battery-status-tui: {error}", file=sys.stderr)
@@ -317,17 +363,53 @@ def _run_v4(args: argparse.Namespace) -> int:
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
     sys.stdout.write(CSI + "?25l")
+    view = None
+    body_error: str | None = None
+    live_sampler = LiveSampler()
+    if args.power_decimals < 0:
+        parser().error("--power-decimals must be non-negative")
+    if args.weighted_power_samples <= 0:
+        parser().error("--weighted-power-samples must be positive")
+    weighted_live_power = WeightedLivePowerDisplay(args.weighted_power_samples)
+    completed_charge = CompletedChargeDisplay()
+    live_reading: LiveReading | None = None
+    persisted_attempted = False
+    next_data_at = 0.0
     try:
         while running:
-            try:
-                output = _render_v4_view(storage, int(time.time()))
-            except (V1HistoryError, V1StorageError, sqlite3.Error) as error:
-                output = f"battery-status-tui: {error}"
-            sys.stdout.write(CSI + "2J" + CSI + "H" + output + "\n")
+            now = time.time()
+            sampled = live_sampler.poll()
+            if sampled is not None:
+                live_reading = sampled
+                weighted_live_power.update(sampled)
+            if not persisted_attempted or now >= next_data_at:
+                try:
+                    view = _load_v4_view(storage, int(now))
+                    body_error = None
+                except (V1HistoryError, V1StorageError, sqlite3.Error) as error:
+                    view = None
+                    body_error = f"battery-status-tui: {error}"
+                persisted_attempted = True
+                next_data_at = now + next_refresh_delay(interval, now)
+            body = (body_error if view is None else render_v1_view(
+                view, live=live_reading, live_now=int(now),
+                weighted_live_power=weighted_live_power.update(live_reading),
+                show_persisted_power=args.show_persisted_power,
+                show_weighted_power=args.show_weighted_power,
+                power_decimals=args.power_decimals,
+                completed_charge_seconds=completed_charge.update(
+                    view, live_reading, int(now)),
+            ))
+            assert body is not None
+            output = _frame_with_footer(body, now, interval, next_data_at)
+            sys.stdout.write(_interactive_frame(output))
             sys.stdout.flush()
-            deadline = time.monotonic() + next_refresh_delay(args.interval, time.time())
+            remaining = max(0.0, next_data_at - time.time())
+            if remaining <= 0:
+                continue
+            deadline = time.monotonic() + min(DISPLAY_HEARTBEAT, remaining)
             while running and time.monotonic() < deadline:
-                time.sleep(min(0.2, deadline - time.monotonic()))
+                time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
     finally:
         sys.stdout.write(RESET + CSI + "?25h")
         sys.stdout.flush()
@@ -381,7 +463,7 @@ def _run_v2(args: argparse.Namespace) -> int:
                                      profile_resolver=profile_resolver)
             except SourceUnavailable as error:
                 output = f"battery-status-tui: {error}"
-            sys.stdout.write(CSI + "2J" + CSI + "H" + output + "\n")
+            sys.stdout.write(_interactive_frame(output))
             sys.stdout.flush()
             shown_profile = profile_resolver.resolve()
             deadline = time.monotonic() + next_refresh_delay(args.interval, time.time())

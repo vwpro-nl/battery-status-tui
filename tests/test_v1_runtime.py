@@ -386,7 +386,7 @@ class V1RuntimeTests(unittest.TestCase):
         points = decode_recent_series(self.storage.recover().snapshot.recent_series)
         span = points[-1].timestamp_ms - points[0].timestamp_ms
         self.assertLessEqual(span, MAX_WINDOW_MS)
-        self.assertEqual(len(points), 13)  # older hourly points fall outside the 12h20m window
+        self.assertEqual(len(points), 16)
         self.assertGreaterEqual(points[0].timestamp_ms,
                                 points[-1].timestamp_ms - MAX_WINDOW_MS)
 

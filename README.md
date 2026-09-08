@@ -2,9 +2,9 @@
 
 `battery-status-tui` is a compact, standalone battery monitor for Linux. It
 records low-overhead local history, separates charging and discharging sessions,
-reconstructs suspend and hibernate gaps, and renders twelve hours of context —
+reconstructs suspend and hibernate gaps, and renders up to 15 h 40 m of context —
 measured history and a forecast that reaches the predicted full/empty time — in
-five lines of terminal output.
+the compact dashboard and an optional muted viewer footer.
 
 It uses only the Python standard library, needs no root, and runs no
 system-wide daemon. History lives in a single SQLite file in your XDG state
@@ -22,7 +22,7 @@ database later without coupling to the collector.
 
 - One glance: current SoC, charge/discharge direction, power draw, ETA,
   State-of-Health, and active power profile.
-- A graph up to 12 h wide on a stable 20-minute grid: a dynamic `NOW` marker
+- A graph up to 15 h 40 m wide on a stable 20-minute grid: a dynamic `NOW` marker
   with history on the left and a forecast on the right sized to the ETA.
 - Honest history: measured time, proven sleep/hibernate time, and unknown gaps
   are visually distinct. Known data is always visible; blank means unknown.
@@ -41,9 +41,8 @@ database later without coupling to the collector.
 - Linux with `/sys/class/power_supply` **and/or** UPower (`upower` CLI).
 - Python 3.11 or newer, plus `pip` for installation. The application itself has
   no third-party runtime packages.
-- A terminal with Unicode (block + Braille glyphs, and emoji for the
-  power-profile face) and 24-bit color for the graph. Check yours with
-  `battery-status-tui --unicode-probe`.
+- A terminal with Unicode (block + Braille glyphs) and 24-bit color for the
+  graph. Check yours with `battery-status-tui --unicode-probe`.
 - Optional, each degrades gracefully if absent:
   - `journalctl` — durable suspend/hibernate reconstruction;
   - `powerprofilesctl` / `busctl` / `/sys/firmware/acpi/platform_profile` —
@@ -137,6 +136,10 @@ Nothing is installed or enabled automatically.
 | `--sample` | Take one sample, print a single terse line (`<epoch> <soc>% <state> <power>`), exit. Used by the systemd timer. |
 | `--interval SECONDS` | Interactive refresh interval (default `60`). |
 | `--database PATH` | Use an alternate SQLite history file (default `${XDG_STATE_HOME:-~/.local/state}/battery-status-tui/history.sqlite3`). |
+| `--power-decimals N` | Set interactive title power precision (default `1`). |
+| `--show-persisted-power` | Diagnostic: prepend minute-level persisted power to the live title power. |
+| `--show-weighted-power` | Diagnostic: append a weighted live-power value to the live title power. |
+| `--weighted-power-samples N` | Set the diagnostic weighted-power window (default `5`). |
 | `--diagnose` | Inspect live sources and print power, health, session, identity, and database details without collecting or modifying the history database. |
 | `--unicode-probe` | Print the block/Braille/profile/axis glyphs the renderer uses, to verify terminal font support. |
 | `--version` | Print the version and exit. |
@@ -144,15 +147,26 @@ Nothing is installed or enabled automatically.
 `--once`, `--sample`, `--diagnose`, and `--unicode-probe` are mutually
 exclusive.
 
+The normal interactive title contains only current live power. Persisted and
+weighted values appear only when their diagnostic options are explicitly set;
+these live diagnostic options do not change collection or stored history.
+
 ## Reading the graph
 
 ```
-BATTERY                 SoC 72% ↓  12.4 W 😎
-0h48             ▁▂▂▂▂▂▂▂▃▃▃▃▃▃▃│⣀          3h10 ~18:20
-start            ███████████████│⣿⣿⣷⣶⣦⣤⣀⣀⣀⣀ empty
-      ──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬─
-        07 08 09 10 11 12 13 14 15 16 17 18   SoH 94.3%
+BATTERY                         12.4W ↓ 72% P
+                    ▁▂▂▂▂▂▂▂▃▃▃▃▃▃▃│⣀
+0h48m               ███████████████│⣿⣿              3h10m
+start               ███████████████│⣿⣿⣷⣶⣦⣤⣀⣀⣀     empty
+      ──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬
+SoH   03 04 05 06 07 08 09 10 11 12 13 14 15 16 17
+65.2% Sun 6 Sep 2026 06:07 · (1m) refresh in 47s
 ```
+
+The last line is viewer chrome, not part of the graph: local date and time
+(minute precision), the configured `--interval`, and the countdown to the next
+read of stored state. It is omitted on a terminal too short to hold it, and
+drops the date/time first if the pane is too narrow.
 
 - **Solid blocks** (`▁`–`█`) are measured history — time the collector was awake
   and recording. They are colored by SoC.
@@ -171,19 +185,22 @@ start            ███████████████│⣿⣿⣷⣶⣦
   short ETA pushes `NOW` right and reveals more past; with no ETA `NOW` sits at
   the far-right edge. `NOW` never moves left of the graph midpoint, so at least
   half the width is always history. A forecast longer than that half is clipped
-  at the right edge — the drawn curve stops mid-slope — while the **text ETA and
-  `~HH:MM` target time stay complete and authoritative**. The title arrow sits
+  at the right edge — the drawn curve stops mid-slope — while the **text ETA
+  duration stays complete and authoritative**. The title arrow sits
   above `NOW`.
 - **`start` / `full` / `empty`.** Left of the rows: time since the current
-  session began (`start`). Right: the estimated remaining time and target clock
-  time, labelled `full` when charging or `empty` when discharging; `--` when
-  there is no estimate.
-- **SoH.** `SoH X.X%` on the label line when a State-of-Health value can be
+  session began (`start`). Right: the estimated remaining duration,
+  labelled `full` when charging or `empty` when discharging; `--` while a
+  newly detected live direction is waiting for compatible persisted ETA data.
+  A steady persisted session with no usable estimate shows `n/a`.
+- **SoH.** `SoH` at the left of the time-label row with `X.X%` directly below it
+  on the footer row when a value can be
   resolved from capacity vs. design capacity.
-- **Power profile.** An emoji face after the power reading: 🥵 performance,
-  😎 balanced, 😴 power-saver. Missing or unrecognized shows no face.
-- **Power source.** `X.X W` is a direct reading, `~X.X W` a time-derived
-  estimate, `-- W` no usable value.
+- **Power profile.** A one-cell `P` after the wattage: xterm 238 for power-saver,
+  244 for balanced, and 252 for performance. Missing or unknown shows no `P`.
+- **Power source.** `X.XW` is a direct reading, `~X.XW` a time-derived
+  estimate, `--W` no usable value. The rendered form has no space before `W`;
+  values below 100 W use one decimal and values at least 100 W use whole watts.
 
 Exact geometry, the SoC colour gradient, and the raster rules are in
 [docs/graph.md](docs/graph.md).
@@ -238,7 +255,7 @@ Grammar:
 
 The final block's end is the fictitious `NOW`; the state and forecast there come
 from the **production estimator** — the simulator never computes its own ETA.
-The whole timeline must fit the 12-hour graph window or the command is rejected
+The whole timeline must fit the 15 h 40 m graph window or the command is rejected
 before rendering; nothing is truncated or rescaled.
 
 Two optional flags override title values (they are **CLI flags, not timeline
@@ -259,8 +276,9 @@ reported, not created — and the independently running collector is unaffected.
   `${XDG_STATE_HOME:-~/.local/state}/battery-status-tui/history.sqlite3`
   (override with `--database`).
 - Long-term history is kept permanently as compact **one-row-per-hour**
-  aggregates. Roughly the **last 12 h 20 min** is also kept at fine sub-hour
-  detail — enough to back the widest graph — carried in a crash-safe checkpoint.
+  aggregates. The **last 16 hours** is also kept at fine sub-hour detail —
+  enough for the widest graph plus clock-alignment margin — in a crash-safe
+  checkpoint. Only this genuine fine-grained data feeds historical graph cells.
 - Every dashboard view is a **read-only** database reader. The simulator's
   live-history access is read-only too.
 - The database holds only battery and power-supply telemetry. **Nothing is
@@ -282,7 +300,7 @@ Details: [docs/storage.md](docs/storage.md).
   by design.
 - ETA needs a few minutes of consistent trend before it appears; brief spikes
   are rejected rather than smoothed.
-- Time-derived power (`~X.X W`) needs at least two minutes of matching awake
+- Time-derived power (`~X.XW`) needs at least two minutes of matching awake
   history.
 - A pre-1.0 development database (schema v2) is not migrated automatically; see
   [docs/migration.md](docs/migration.md).

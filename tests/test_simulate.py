@@ -64,10 +64,10 @@ def _chart(inputs):
 
 def _column_kinds(inputs) -> list[str]:
     marker = now_column(inputs.current, inputs.estimate)
-    top, bottom, pct = _chart(inputs)
+    top, middle, bottom, pct = _chart(inputs)
     kinds = []
     for column in range(marker):
-        glyphs = (top[column] + bottom[column]).strip()
+        glyphs = (top[column] + middle[column] + bottom[column]).strip()
         if not glyphs:
             kinds.append("blank")
         elif pct[column] is UNKNOWN_TRAJECTORY:
@@ -205,7 +205,7 @@ class TimelineGrammarTests(unittest.TestCase):
         ok = int(MAX_SPAN_SECONDS)
         simulate.parse_timeline([f"{ok // 3600}h"])  # exactly the window: allowed
         with self.assertRaises(ValueError) as raised:
-            simulate.parse_timeline(["7h=50%", "6h=20%"])  # 13h > 12h
+            simulate.parse_timeline(["9h=50%", "8h=20%"])  # 17h > 16h
         self.assertIn("history window", str(raised.exception))
         # arbitrary block count within the window is fine
         blocks, _ = simulate.parse_timeline(["30m"] * 20)  # 10 h
@@ -307,7 +307,7 @@ class TimelineFromLiveTests(unittest.TestCase):
     def test_normal_block_creates_the_intended_active_trajectory(self):
         inputs = self._build("3h=20%")
         marker = now_column(inputs.current, inputs.estimate)
-        _, _, pct = _chart_rows_and_percentages(
+        _, _, _, pct = _chart_rows_and_percentages(
             inputs.current, inputs.history, inputs.estimate, inputs.now, inputs.sleeps
         )
         added = [pct[c] for c in range(marker) if pct[c] is not None][-6:]
@@ -339,13 +339,13 @@ class TimelineFromLiveTests(unittest.TestCase):
         self.assertEqual(inputs.sleeps, read_v1_view(V1Storage(self.db), now=LIVE_NOW).sleeps)
 
         marker = now_column(inputs.current, inputs.estimate)
-        top, bottom, pct = _chart(inputs)
+        top, middle, bottom, pct = _chart(inputs)
         gap_cols = [c for c in range(marker)
                     if gap.started_at <= column_timestamp(c, inputs.now, marker) < gap.ended_at]
         self.assertGreaterEqual(len(gap_cols), 5)
         for c in gap_cols:
             self.assertIs(pct[c], UNKNOWN_TRAJECTORY)                       # tagged unknown
-            glyphs = (top[c] + bottom[c]).strip()
+            glyphs = (top[c] + middle[c] + bottom[c]).strip()
             self.assertTrue(glyphs and all(0x2800 <= ord(g) <= 0x28FF for g in glyphs))  # braille
 
         styled = graph._style_battery(bottom, pct)
@@ -367,11 +367,11 @@ class TimelineFromLiveTests(unittest.TestCase):
                 marker = now_column(inputs.current, inputs.estimate)
                 from battery_status_tui.graph import column_timestamp
                 heights = []
-                top, bottom, pct = _chart(inputs)
+                top, middle, bottom, pct = _chart(inputs)
                 for c in range(marker):
                     if pct[c] is UNKNOWN_TRAJECTORY:
                         dots = sum((ord(g) - 0x2800).bit_count()
-                                   for g in (top[c], bottom[c]) if g != " ")
+                                   for g in (top[c], middle[c], bottom[c]) if g != " ")
                         heights.append(dots)
                 self.assertGreaterEqual(len(heights), 5)
                 if relation == "rises":
@@ -395,12 +395,14 @@ class TimelineFromLiveTests(unittest.TestCase):
         self.assertEqual(nodata_inputs.unknown_intervals[0].kind, "nodata")
         self.assertEqual(len(nodata_inputs.sleeps), len(sleep_inputs.sleeps) - 1)
 
-        sleep_pct = [p for p in _chart(sleep_inputs)[2] if p is UNKNOWN_TRAJECTORY]
-        nodata_pct = [p for p in _chart(nodata_inputs)[2] if p is UNKNOWN_TRAJECTORY]
+        sleep_pct = [p for p in _chart(sleep_inputs)[3] if p is UNKNOWN_TRAJECTORY]
+        nodata_pct = [p for p in _chart(nodata_inputs)[3] if p is UNKNOWN_TRAJECTORY]
         self.assertFalse(sleep_pct)                 # sleep never uses the unknown tag
         self.assertTrue(nodata_pct)
-        self.assertNotIn(graph.UNKNOWN_GRAY, sleep_inputs.render())
-        self.assertIn(graph.UNKNOWN_GRAY, nodata_inputs.render())
+        sleep_graph_rows = "\n".join(sleep_inputs.render().splitlines()[1:4])
+        nodata_graph_rows = "\n".join(nodata_inputs.render().splitlines()[1:4])
+        self.assertNotIn(graph.UNKNOWN_GRAY, sleep_graph_rows)
+        self.assertIn(graph.UNKNOWN_GRAY, nodata_graph_rows)
 
     def test_the_locked_sleep_render_is_unchanged_by_the_nodata_feature(self):
         inputs = self._build("1h=64%", "3h:sleep=-25%", "dc")
@@ -410,11 +412,12 @@ class TimelineFromLiveTests(unittest.TestCase):
         with_empty_unknown = _chart_rows_and_percentages(
             inputs.current, inputs.history, inputs.estimate, inputs.now, inputs.sleeps, ())
         self.assertEqual(with_default, with_empty_unknown)   # empty unknowns => byte-identical
-        top, bottom, pct = with_default
+        top, middle, bottom, pct = with_default
         marker = now_column(inputs.current, inputs.estimate)
         sleep_cols = [c for c in range(marker)
-                      if (top[c] + bottom[c]).strip()
-                      and all(0x2800 <= ord(g) <= 0x28FF for g in (top[c] + bottom[c]).strip())]
+                      if (top[c] + middle[c] + bottom[c]).strip()
+                      and all(0x2800 <= ord(g) <= 0x28FF
+                              for g in (top[c] + middle[c] + bottom[c]).strip())]
         self.assertTrue(sleep_cols)
         for c in sleep_cols:
             self.assertIsInstance(pct[c], float)            # real interpolated SoC, gradient-coloured
@@ -425,16 +428,16 @@ class TimelineFromLiveTests(unittest.TestCase):
         # a genuine gap: two real samples far apart, no sleep, no nodata interval
         history = list(read_v1_view(V1Storage(self.db), now=LIVE_NOW).history)
         current = Measurement(LIVE_NOW, 64.0, "discharging", False)
-        top, bottom, pct = _chart_rows_and_percentages(
+        top, middle, bottom, pct = _chart_rows_and_percentages(
             current, history[:1] + history[-1:], None, LIVE_NOW)
         self.assertNotIn(UNKNOWN_TRAJECTORY, pct)
         # an unknown interval missing an endpoint checkpoint is also left blank
         half = SleepInterval(LIVE_NOW - 7200, LIVE_NOW - 3600, "nodata", "simulate",
                              "b", pre_percentage=60.0, post_percentage=None)
-        top, bottom, pct = _chart_rows_and_percentages(
+        top, middle, bottom, pct = _chart_rows_and_percentages(
             current, [], None, LIVE_NOW, (), (half,))
         self.assertNotIn(UNKNOWN_TRAJECTORY, pct)
-        self.assertEqual(set(top) | set(bottom), {" ", "│"})
+        self.assertEqual(set(top) | set(middle) | set(bottom), {" ", "│"})
 
     def test_mixed_timeline_stays_ordered_solid_braille_gray_solid(self):
         inputs = self._build("2h=50%", "3h:sleep=-20%", "1h:nodata", "45m=82%", "ac")

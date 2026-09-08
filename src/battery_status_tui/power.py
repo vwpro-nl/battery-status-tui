@@ -1,5 +1,6 @@
 """Resolve direct and time-derived battery power."""
 from __future__ import annotations
+import math
 import statistics
 from collections.abc import Sequence
 from .models import PowerReading, RawBatterySnapshot
@@ -8,6 +9,16 @@ MIN_DELTA_SECONDS = 120
 MAX_DELTA_SECONDS = 600
 MIN_USEFUL_WATTS = 0.05
 MAX_PLAUSIBLE_WATTS = 500.0
+SYSFS_DIRECT_METHODS = frozenset({"power-now", "current-voltage"})
+
+def is_sysfs_direct_method(method: str) -> bool:
+    if method in SYSFS_DIRECT_METHODS:
+        return True
+    if not method.startswith("mixed:"):
+        return False
+    constituents = method.removeprefix("mixed:").split("+")
+    return bool(constituents) and all(item in SYSFS_DIRECT_METHODS
+                                      for item in constituents)
 
 def _valid(value: float | None, state: str) -> float | None:
     if value is None or value < 0 or value > MAX_PLAUSIBLE_WATTS:
@@ -25,18 +36,40 @@ def _directional_delta(previous: float, current: float, state: str) -> float | N
     return abs(delta)
 
 class PowerResolver:
-    def resolve(self, current: RawBatterySnapshot, history: Sequence[RawBatterySnapshot] = (),
-                sleep_intervals: Sequence[tuple[int, int]] = ()) -> PowerReading:
-        value = _valid(current.power_now_w, current.state)
-        if value is not None:
+    def resolve_sysfs_direct(self, current: RawBatterySnapshot) -> PowerReading:
+        """Resolve only instantaneous sysfs sources suitable for live display."""
+        value = current.power_now_w
+        if value is not None and (not math.isfinite(value) or value < 0
+                                  or value > MAX_PLAUSIBLE_WATTS):
+            value = None
+        power_now = value
+        if value is not None and not (current.state in {"charging", "discharging"}
+                                      and value < MIN_USEFUL_WATTS):
             return PowerReading(value, "power-now", confidence="high")
         if current.current_now_a is not None and current.voltage_now_v is not None:
-            value = _valid(abs(current.current_now_a * current.voltage_now_v), current.state)
-            if value is not None:
+            value = abs(current.current_now_a * current.voltage_now_v)
+            if math.isfinite(value) and value <= MAX_PLAUSIBLE_WATTS:
                 return PowerReading(value, "current-voltage", confidence="high")
+        if power_now is not None:
+            return PowerReading(power_now, "power-now", confidence="high")
+        return PowerReading(None, "unavailable")
+
+    def resolve(self, current: RawBatterySnapshot, history: Sequence[RawBatterySnapshot] = (),
+                sleep_intervals: Sequence[tuple[int, int]] = ()) -> PowerReading:
+        direct = self.resolve_sysfs_direct(current)
+        if _valid(direct.watts, current.state) is not None:
+            return direct
         value = _valid(current.upower_energy_rate_w, current.state)
         if value is not None:
             return PowerReading(abs(value), "upower-energy-rate", confidence="medium")
+        return self.resolve_counter_delta(current, history, sleep_intervals)
+
+    def resolve_counter_delta(
+        self, current: RawBatterySnapshot,
+        history: Sequence[RawBatterySnapshot] = (),
+        sleep_intervals: Sequence[tuple[int, int]] = (),
+    ) -> PowerReading:
+        """Resolve native counter deltas without consulting direct or UPower data."""
         readings: list[tuple[float, float, str]] = []
         for previous in history:
             wall_elapsed = current.timestamp - previous.timestamp

@@ -52,8 +52,8 @@ marker moves (see [graph.md](graph.md#dynamic-now-column)).
 `NOW` never moves left of the graph midpoint, so at least half the width is
 always history. A forecast whose horizon is longer than that half is **clipped
 at the right edge** — the drawn curve simply stops mid-slope. It is never
-compressed or rescaled to fit, and the textual remaining time and target clock
-time stay complete and authoritative regardless of the clip.
+compressed or rescaled to fit, and the textual remaining duration stays
+complete and authoritative regardless of the clip.
 
 See [graph.md](graph.md#forecast-behavior) for the rendering details.
 
@@ -64,3 +64,8 @@ value uses raw energy or charge counters, becomes eligible after 120 seconds,
 may extend its window to ten minutes for coarse counters, uses the median of
 valid deltas, and never spans a recorded sleep interval. See
 [data-sources.md](data-sources.md#power-resolution).
+
+The live direction is presentation-authoritative before the minute collector
+catches up: the arrow and `full`/`empty` target switch immediately, the stale
+opposite-direction ETA is suppressed, and `--` is shown until compatible
+persisted session data can produce a new ETA.

@@ -44,25 +44,35 @@ BATTERY_COLOR_STOPS = (
     (100.0, (20, 105, 50)),
 )
 
-TIME_COLUMNS = 36
+TIME_COLUMNS = 47
 COLUMN_SECONDS = 20 * 60
 GRAPH_WIDTH = TIME_COLUMNS + 1
+GRAPH_ROWS = 3
 NOW_INDEX = TIME_COLUMNS // 2  # graph midpoint; the live NOW column is dynamic but never left of here
 HISTORY_SECONDS = 6 * 3600
 MAX_SPAN_SECONDS = TIME_COLUMNS * COLUMN_SECONDS
+# Clock-aligned column 0 can begin almost one 20-minute bucket before
+# ``now - MAX_SPAN_SECONDS``. Readers load this extra bucket so the leftmost
+# history cell is not an empty hole when NOW sits at the right edge.
+HISTORY_LOOKBACK_SECONDS = MAX_SPAN_SECONDS + COLUMN_SECONDS
 TICK_SECONDS = 3600
 GRAPH_OFFSET = 6
 MIN_EARLY_SLOPE = 0.25
 BLOCKS = " ▁▂▃▄▅▆▇█"
+SOLID_LEVELS = GRAPH_ROWS * 8
+BRAILLE_DOTS_PER_ROW = 4
+BRAILLE_LEVELS = GRAPH_ROWS * BRAILLE_DOTS_PER_ROW
 
-# One face per power profile. These are emoji and render two terminal cells
-# wide; the title layout accounts for that via ``display_width``. Keep this the
-# single place the mapping is defined.
-POWER_PROFILE_FACES = {
-    "performance": "🥵",
-    "balanced": "😎",
-    "power-saver": "😴",
+# Foregrounds for the one-cell power-profile indicator. Missing or
+# unrecognised profiles show no indicator.
+POWER_PROFILE_COLORS = {
+    "power-saver": CSI + "38;5;238m",
+    "balanced": CSI + "38;5;244m",
+    "performance": CSI + "38;5;252m",
 }
+RIGHT_COLUMN_START = 54
+RIGHT_COLUMN_END = 59
+RIGHT_COLUMN_WIDTH = RIGHT_COLUMN_END - RIGHT_COLUMN_START + 1
 BRAILLE_LEFT_BOTTOM_UP = (0x40, 0x04, 0x02, 0x01)
 BRAILLE_RIGHT_BOTTOM_UP = (0x80, 0x20, 0x10, 0x08)
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -95,11 +105,12 @@ def _put(canvas: list[str], position: int, text: str) -> None:
             canvas[target] = character
 
 
-def _fill_chars(percentage: float) -> tuple[str, str]:
-    level = max(1, min(16, round(percentage / 100 * 16)))
+def _fill_chars(percentage: float) -> tuple[str, str, str]:
+    level = max(1, min(SOLID_LEVELS, round(percentage / 100 * SOLID_LEVELS)))
     bottom = BLOCKS[min(8, level)]
-    top = BLOCKS[max(0, level - 8)]
-    return top, bottom
+    middle = BLOCKS[min(8, max(0, level - 8))]
+    top = BLOCKS[max(0, level - 16)]
+    return top, middle, bottom
 
 
 def _braille_mask(left_count: int, right_count: int) -> str:
@@ -107,21 +118,22 @@ def _braille_mask(left_count: int, right_count: int) -> str:
     return " " if mask == 0 else chr(0x2800 + mask)
 
 
-def _braille_fill(left_percentage: float, right_percentage: float | None = None) -> tuple[str, str]:
+def _braille_fill(left_percentage: float, right_percentage: float | None = None) -> tuple[str, str, str]:
     right_percentage = left_percentage if right_percentage is None else right_percentage
-    left_levels = _braille_level(left_percentage / 100 * 8)
-    right_levels = _braille_level(right_percentage / 100 * 8)
+    left_levels = _braille_level(left_percentage / 100 * BRAILLE_LEVELS)
+    right_levels = _braille_level(right_percentage / 100 * BRAILLE_LEVELS)
     return _braille_fill_levels(left_levels, right_levels)
 
 
 def _braille_level(continuous_height: float) -> int:
     """Quantize a valid SoC without making its subcolumn disappear."""
-    return max(1, min(8, round(continuous_height)))
+    return max(1, min(BRAILLE_LEVELS, round(continuous_height)))
 
 
-def _braille_fill_levels(left_levels: int, right_levels: int) -> tuple[str, str]:
+def _braille_fill_levels(left_levels: int, right_levels: int) -> tuple[str, str, str]:
     return (
-        _braille_mask(max(0, left_levels - 4), max(0, right_levels - 4)),
+        _braille_mask(max(0, left_levels - 8), max(0, right_levels - 8)),
+        _braille_mask(max(0, min(4, left_levels - 4)), max(0, min(4, right_levels - 4))),
         _braille_mask(min(4, left_levels), min(4, right_levels)),
     )
 
@@ -158,7 +170,8 @@ def _sleep_residual_transfer(continuous_heights: Sequence[float], raster: Sequen
     if not (rising or falling) or abs(continuous_heights[-1] - continuous_heights[0]) >= 1:
         return transferred
     direction = 1 if rising else -1
-    if not (0 <= transferred[0] - direction <= 8 and 0 <= transferred[-1] + direction <= 8):
+    if not (0 <= transferred[0] - direction <= BRAILLE_LEVELS
+            and 0 <= transferred[-1] + direction <= BRAILLE_LEVELS):
         return transferred
     transferred[0] -= direction
     transferred[-1] += direction
@@ -281,7 +294,7 @@ def _smooth_sleep_edges(
             return None
         if top[column] not in BLOCKS or bottom[column] not in BLOCKS:
             return None
-        return max(0, min(16, round((percentages[column] or 0) / 100 * 16)))
+        return max(0, min(SOLID_LEVELS, round((percentages[column] or 0) / 100 * SOLID_LEVELS)))
 
     def adjust(index: int, neighbor: int, avoid_overshoot: bool = False) -> None:
         level = solid_level(neighbor)
@@ -294,7 +307,7 @@ def _smooth_sleep_edges(
             if not avoid_overshoot or candidate * 2 >= level:
                 raster[index] = candidate
         elif level > braille_level:
-            candidate = min(8, baseline[index] + 1)
+            candidate = min(BRAILLE_LEVELS, baseline[index] + 1)
             if not avoid_overshoot or candidate * 2 <= level:
                 raster[index] = candidate
 
@@ -308,13 +321,11 @@ def _smooth_sleep_edges(
     return raster
 
 
-def profile_face(profile: str | None) -> str | None:
-    """The emoji face for a power profile, or ``None`` when there is nothing to
-    show. A missing or unrecognised profile shows no face rather than a made-up
-    one."""
+def profile_color(profile: str | None) -> str | None:
+    """xterm foreground for the one-cell profile indicator."""
     if not profile:
         return None
-    return POWER_PROFILE_FACES.get(profile)
+    return POWER_PROFILE_COLORS.get(profile)
 
 
 def _battery_color(percentage: float) -> str:
@@ -339,10 +350,11 @@ def _chart_rows_and_percentages(
     now: int,
     sleep_intervals: Sequence[SleepInterval] = (),
     unknown_intervals: Sequence[SleepInterval] = (),
-) -> tuple[str, str, list]:
+) -> tuple[str, str, str, list]:
     marker_column = now_column(current, estimate)
     left_edge = column_timestamp(0, now, marker_column)
     top = [" "] * GRAPH_WIDTH
+    middle = [" "] * GRAPH_WIDTH
     bottom = [" "] * GRAPH_WIDTH
     percentages_by_column: list[float | None] = [None] * GRAPH_WIDTH
     buckets: dict[int, list[float]] = defaultdict(list)
@@ -353,7 +365,7 @@ def _chart_rows_and_percentages(
                 buckets[column].append(sample.percentage)
     for column, bucket_percentages in buckets.items():
         percentage = statistics.median(bucket_percentages)
-        top[column], bottom[column] = _fill_chars(percentage)
+        top[column], middle[column], bottom[column] = _fill_chars(percentage)
         percentages_by_column[column] = percentage
 
     for interval in sleep_intervals:
@@ -386,7 +398,7 @@ def _chart_rows_and_percentages(
                                                    COLUMN_SECONDS)
                     percentage = active if active is not None else percentage
                 subcolumn_percentages.append(percentage)
-        continuous_heights = [percentage / 100 * 8 for percentage in subcolumn_percentages]
+        continuous_heights = [percentage / 100 * BRAILLE_LEVELS for percentage in subcolumn_percentages]
         baseline = _early_raster(continuous_heights)
         raster = _sleep_residual_transfer(continuous_heights, baseline)
         raster = _smooth_sleep_edges(render_columns, raster, baseline, top, bottom,
@@ -395,7 +407,8 @@ def _chart_rows_and_percentages(
         for index, column in enumerate(render_columns):
             bucket_start = column_timestamp(column, now, marker_column)
             center_timestamp = bucket_start + COLUMN_SECONDS / 2
-            top[column], bottom[column] = _braille_fill_levels(*raster[index * 2:index * 2 + 2])
+            top[column], middle[column], bottom[column] = _braille_fill_levels(
+                *raster[index * 2:index * 2 + 2])
             percentages_by_column[column] = sleep_percentage(center_timestamp)
 
     # Unknown-trajectory intervals (simulator ``:nodata``): the two endpoint SoC
@@ -423,14 +436,16 @@ def _chart_rows_and_percentages(
         for column in columns:
             bucket_start = column_timestamp(column, now, marker_column)
             left_timestamp, right_timestamp = _braille_subcolumn_times(bucket_start, COLUMN_SECONDS)
-            subcolumn_heights.extend((unknown_percentage(left_timestamp) / 100 * 8,
-                                      unknown_percentage(right_timestamp) / 100 * 8))
+            subcolumn_heights.extend((unknown_percentage(left_timestamp) / 100 * BRAILLE_LEVELS,
+                                      unknown_percentage(right_timestamp) / 100 * BRAILLE_LEVELS))
         raster = _keep_valid_subcolumns_visible(_early_raster(subcolumn_heights))
         for index, column in enumerate(columns):
-            top[column], bottom[column] = _braille_fill_levels(*raster[index * 2:index * 2 + 2])
+            top[column], middle[column], bottom[column] = _braille_fill_levels(
+                *raster[index * 2:index * 2 + 2])
             percentages_by_column[column] = UNKNOWN_TRAJECTORY
 
     top[marker_column] = "│"
+    middle[marker_column] = "│"
     bottom[marker_column] = "│"
     kind = current.session_kind
     if estimate is not None and estimate.seconds > 0 and kind in {"charging", "discharging"}:
@@ -447,16 +462,17 @@ def _chart_rows_and_percentages(
             bucket_start = column_timestamp(column, now, marker_column)
             left_timestamp, right_timestamp = _braille_subcolumn_times(bucket_start, COLUMN_SECONDS)
             subcolumn_percentages.extend((forecast_percentage(left_timestamp), forecast_percentage(right_timestamp)))
-        continuous_heights = [percentage / 100 * 8 for percentage in subcolumn_percentages]
+        continuous_heights = [percentage / 100 * BRAILLE_LEVELS for percentage in subcolumn_percentages]
         raster = _keep_valid_subcolumns_visible(
             _early_raster(continuous_heights)
         )
         for index, column in enumerate(forecast_columns):
             bucket_start = column_timestamp(column, now, marker_column)
             center_timestamp = bucket_start + COLUMN_SECONDS / 2
-            top[column], bottom[column] = _braille_fill_levels(*raster[index * 2:index * 2 + 2])
+            top[column], middle[column], bottom[column] = _braille_fill_levels(
+                *raster[index * 2:index * 2 + 2])
             percentages_by_column[column] = forecast_percentage(center_timestamp)
-    return "".join(top), "".join(bottom), percentages_by_column
+    return "".join(top), "".join(middle), "".join(bottom), percentages_by_column
 
 
 def chart_rows(
@@ -465,9 +481,10 @@ def chart_rows(
     estimate: Estimate | None,
     now: int,
     sleep_intervals: Sequence[SleepInterval] = (),
-) -> tuple[str, str]:
-    top, bottom, _ = _chart_rows_and_percentages(current, history, estimate, now, sleep_intervals)
-    return top, bottom
+) -> tuple[str, str, str]:
+    top, middle, bottom, _ = _chart_rows_and_percentages(
+        current, history, estimate, now, sleep_intervals)
+    return top, middle, bottom
 
 
 def format_duration(seconds: int | None) -> str:
@@ -478,7 +495,7 @@ def format_duration(seconds: int | None) -> str:
     if hours >= 24:
         days, hours = divmod(hours, 24)
         return f"{days}d{hours}h"
-    return f"{hours}h{minutes:02d}"
+    return f"{hours}h{minutes:02d}m"
 
 
 def axis_rows(now: int, now_col: int = NOW_INDEX) -> tuple[str, str]:
@@ -512,33 +529,78 @@ def _style_battery(row: str, percentages: Sequence[object]) -> str:
     return "".join(pieces)
 
 
+def _power_token(current: Measurement | None, decimals: int = 1) -> str:
+    if current is None or current.power_w is None:
+        return "--W"
+    prefix = "~" if current.power_approximate else ""
+    return f"{prefix}{current.power_w:.{decimals}f}W"
+
+
 def title_line(
     current: Measurement, power_profile: str | None = None, now_col: int = NOW_INDEX,
-    heading: str = "BATTERY",
+    heading: str = "BATTERY", presentation_direction: str | None = None,
+    diagnostic_power: tuple[Measurement, Measurement | None, Measurement | None] | None = None,
+    show_persisted_power: bool = False, show_weighted_power: bool = False,
+    power_decimals: int = 1,
 ) -> str:
-    arrow = "↑" if current.session_kind == "charging" else "↓" if current.session_kind == "discharging" else "·"
+    direction = current.session_kind if presentation_direction is None else presentation_direction
+    arrow = "↑" if direction == "charging" else "↓" if direction == "discharging" else "·"
     arrow_column = GRAPH_OFFSET + now_col
-    if current.power_w is None:
-        power = " -- W"
+    if diagnostic_power is None:
+        wattage = _power_token(current, power_decimals)
+        dim_prefix_length = 0
+        accent_start = None
     else:
-        value = f"{'~' if current.power_approximate else ''}{current.power_w:.1f}"
-        power = f"{value:>6} W"
-    # The profile face is an emoji: one code point, two terminal cells. It is
-    # placed last so nothing downstream needs re-flowing; every cell before the
-    # arrow is width 1, so the arrow still lands on ``arrow_column`` on screen.
-    face = profile_face(power_profile)
-    trailing = f"{power} {face}" if face else power
-    canvas = [" "] * (arrow_column + 1 + len(trailing))
+        persisted_power, live_power, weighted_power = diagnostic_power
+        live_token = _power_token(live_power, power_decimals)
+        tokens = []
+        if show_persisted_power:
+            tokens.append(_power_token(persisted_power, power_decimals))
+        tokens.append(live_token)
+        if show_weighted_power:
+            tokens.append(_power_token(weighted_power, power_decimals))
+        wattage = " / ".join(tokens)
+        dim_prefix_length = (len(tokens[0]) + len(" / ")
+                             if show_persisted_power else 0)
+        accent_start = (len(wattage) - len(tokens[-1])
+                        if show_weighted_power else None)
+    wattage_start = arrow_column - len(wattage) - 1
+    percentage = f"{current.percentage:.0f}%"
+    # A three-digit SoC uses the separator cell so the title keeps its fixed
+    # right edge at 100% (``·100%`` versus ``· 99%``).
+    percentage_start = arrow_column + (1 if len(percentage) == 4 else 2)
+    end = percentage_start + len(percentage)
+    indicator_color = profile_color(power_profile)
+    indicator_column = None
+    if indicator_color:
+        indicator_column = end + 1
+        end = indicator_column + 1
+    canvas = [" "] * end
     _put(canvas, 0, heading)
-    percentage = f"SoC {current.percentage:.0f}%"
-    percentage_start = arrow_column - len(percentage) - 1
-    if percentage_start >= len(heading) + 1:
-        _put(canvas, percentage_start, percentage)
+    _put(canvas, wattage_start, wattage)
     _put(canvas, arrow_column, arrow)
-    _put(canvas, arrow_column + 1, trailing)
+    _put(canvas, percentage_start, percentage)
+    if indicator_column is not None:
+        _put(canvas, indicator_column, "P")
     plain = "".join(canvas).rstrip()
-    return (f"{BOLD}{CYAN}{plain[:len(heading)]}{RESET}{plain[len(heading):arrow_column]}"
-            f"{YELLOW}{arrow}{RESET}{plain[arrow_column + 1:]}")
+    if diagnostic_power is None:
+        before_arrow = plain[len(heading):arrow_column]
+    else:
+        before_arrow = plain[len(heading):wattage_start]
+        if dim_prefix_length:
+            before_arrow += (DIM + plain[wattage_start:wattage_start + dim_prefix_length]
+                             + RESET)
+        middle_start = wattage_start + dim_prefix_length
+        middle_end = arrow_column if accent_start is None else wattage_start + accent_start
+        before_arrow += plain[middle_start:middle_end]
+        if accent_start is not None:
+            before_arrow += CYAN + plain[middle_end:arrow_column] + RESET
+    result = (f"{BOLD}{CYAN}{plain[:len(heading)]}{RESET}"
+              f"{before_arrow}{YELLOW}{arrow}{RESET}")
+    if indicator_column is None:
+        return result + plain[arrow_column + 1:]
+    return (result + plain[arrow_column + 1:indicator_column]
+            + indicator_color + "P" + RESET)
 
 
 def render_dashboard(
@@ -552,29 +614,54 @@ def render_dashboard(
     power_profile: str | None = None,
     heading: str = "BATTERY",
     unknown_intervals: Sequence[SleepInterval] = (),
+    title_current: Measurement | None = None,
+    presentation_direction: str | None = None,
+    diagnostic_power: tuple[Measurement, Measurement | None, Measurement | None] | None = None,
+    show_persisted_power: bool = False, show_weighted_power: bool = False,
+    power_decimals: int = 1, completed_charge_seconds: int | None = None,
+    semantic_direction: str | None = None, eta_pending: bool = False,
 ) -> str:
     marker_column = now_column(current, estimate)
-    top, bottom, percentages = _chart_rows_and_percentages(
+    top, middle, bottom, percentages = _chart_rows_and_percentages(
         current, history, estimate, now, sleep_intervals, unknown_intervals)
     elapsed = None if session is None else max(0, now - session.started_at)
-    left_label = format_duration(elapsed).ljust(GRAPH_OFFSET)
-    if estimate is None:
+    shown_elapsed = completed_charge_seconds if completed_charge_seconds is not None else elapsed
+    left_label = (("--" if eta_pending else format_duration(shown_elapsed))
+                  .ljust(GRAPH_OFFSET))
+    if completed_charge_seconds is not None:
+        right_label = ""
+    elif eta_pending:
         right_label = "--"
+    elif estimate is None:
+        right_label = "n/a"
     else:
-        end_time = dt.datetime.fromtimestamp(now + estimate.seconds).astimezone().strftime("%H:%M")
-        right_label = f"{format_duration(estimate.seconds)} ~{end_time}"
+        right_label = format_duration(estimate.seconds)
     axis, labels = axis_rows(now, marker_column)
-    left_meaning = "start" if elapsed is not None else ""
-    right_meaning = ("full" if current.session_kind == "charging" else "empty") if (
-        estimate is not None and current.session_kind in {"charging", "discharging"}
+    left_meaning = "charge" if completed_charge_seconds is not None else (
+        "" if eta_pending else "start" if elapsed is not None else "")
+    target_direction = semantic_direction or current.session_kind
+    right_meaning = "full" if completed_charge_seconds is not None else (
+        "full" if target_direction == "charging" else "empty") if (
+        target_direction in {"charging", "discharging"}
     ) else ""
+    right_gap = " " * (RIGHT_COLUMN_START - (GRAPH_OFFSET + GRAPH_WIDTH))
+    right = lambda value: right_gap + value.rjust(RIGHT_COLUMN_WIDTH)
+    health_value = "" if health_percent is None else f"{health_percent:.1f}%"
     return "\n".join(
         (
-            title_line(current, power_profile, marker_column, heading),
-            f"{MUTED}{left_label}{RESET}{_style_battery(top, percentages)} {DIM}{right_label}{RESET}",
-            f"{MUTED}{DIM}{left_meaning.ljust(GRAPH_OFFSET)}{RESET}{_style_battery(bottom, percentages)} "
-            f"{MUTED}{DIM}{right_meaning}{RESET}".rstrip(),
-            " " * GRAPH_OFFSET + axis,
-            " " * GRAPH_OFFSET + labels.ljust(GRAPH_WIDTH) + (f"   SoH {health_percent:.1f}%" if health_percent is not None else ""),
+            title_line(title_current or current, power_profile, marker_column, heading,
+                       presentation_direction, diagnostic_power,
+                       show_persisted_power, show_weighted_power, power_decimals),
+            " " * GRAPH_OFFSET + _style_battery(top, percentages) + right(""),
+            (f"{MUTED}{left_label}{RESET}{_style_battery(middle, percentages)}"
+             f"{DIM}{right(right_label)}{RESET}"),
+            (f"{MUTED}{left_meaning.ljust(GRAPH_OFFSET)}{RESET}"
+             f"{_style_battery(bottom, percentages)}"
+             f"{MUTED}{right(right_meaning)}{RESET}"),
+            " " * GRAPH_OFFSET + f"{MUTED}{axis}{RESET}" + right(""),
+            ((f"{MUTED}SoH{RESET}" if health_percent is not None else "   ")
+             + " " * (GRAPH_OFFSET - 3)
+             + f"{MUTED}{labels.ljust(GRAPH_WIDTH)}{RESET}" + right("")),
+            (f"{MUTED}{health_value}{RESET}" if health_value else ""),
         )
-    )
+    ).rstrip("\n")
