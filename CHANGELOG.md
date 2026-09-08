@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format is loosely
 based on [Keep a Changelog](https://keepachangelog.com/). This project follows
 [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 1.1.0 — 2026-09-08
 
 ### Changed
 
@@ -39,6 +39,9 @@ based on [Keep a Changelog](https://keepachangelog.com/). This project follows
   cells; `hourly_history` remains the permanent canonical accounting record and
   is not presented as pseudo-20-minute data. Applies to samples collected from
   now on.
+- The viewer frame supports an exact 62×7 terminal layout with one internal
+  blank column at each side, compact three-digit SoC rendering, and bounded
+  behavior in smaller panes without deferred-wrap scrolling.
 
 ### Added
 
@@ -86,7 +89,7 @@ based on [Keep a Changelog](https://keepachangelog.com/). This project follows
   no writer/migration path), leaving the live collector untouched. See the
   README "Simulating the dashboard" section.
 
-## 1.0.0 — unreleased
+## 1.0.0 — 2026-08-29
 
 First public release.
 

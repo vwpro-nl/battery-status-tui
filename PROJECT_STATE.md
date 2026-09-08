@@ -8,6 +8,7 @@ the project. Update it when an accepted architectural or LOCKED decision changes
 
 ## 1. Current baseline
 
+- **Release:** 1.1.0 (2026-09-08).
 - **Checkpoint commit:** `db37fa8` — *Add live sysfs sampling and finalize
   compact dashboard*.
 - **Production TUI purpose:** a compact terminal dashboard for one Linux
