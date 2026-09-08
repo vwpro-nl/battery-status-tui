@@ -8,6 +8,9 @@ based on [Keep a Changelog](https://keepachangelog.com/). This project follows
 
 ### Changed
 
+- Hardware validation on 8 September 2026 covered a complete charge, persisted
+  full reconstruction after viewer restart, unplug transition, live discharge
+  counter power, and delayed compatible discharge ETA/forecast successfully.
 - The graph is three plotting rows by 48 cells (47 time columns plus `NOW`)
   on the existing 20-minute scale, so the visible span is 15 h 40 m. The
   fine-grained `recent_series` retention is 16 h so the full viewport plus

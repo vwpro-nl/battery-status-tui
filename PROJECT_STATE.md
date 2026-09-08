@@ -8,8 +8,8 @@ the project. Update it when an accepted architectural or LOCKED decision changes
 
 ## 1. Current baseline
 
-- **Checkpoint commit:** `b9ff15f` — *Update documentation for current
-  dashboard behavior* (the current development round remains uncommitted).
+- **Checkpoint commit:** `db37fa8` — *Add live sysfs sampling and finalize
+  compact dashboard*.
 - **Production TUI purpose:** a compact terminal dashboard for one Linux
   laptop's internal battery — current SoC, charge/discharge direction, power
   draw, remaining-time ETA, State-of-Health, active power profile, and a
@@ -25,11 +25,31 @@ the project. Update it when an accepted architectural or LOCKED decision changes
   gaps, forecast shapes, viewport behaviour) without waiting for real hardware
   events. It shows a `SIMULATION` heading so its output can never be mistaken
   for the live dashboard.
-- **Test count:** 456 passing in the current working tree before this audit
+- **Test count:** 456 passing for the completed implementation
   (`PYTHONPATH=src python -m unittest discover -s tests`).
 - **Dependencies:** Python standard library only. `pyproject.toml` declares
   `dependencies = []`; no non-stdlib import exists anywhere in
   `src/battery_status_tui/`. Requires Python ≥ 3.11.
+
+### Hardware validation — 8 September 2026
+
+A complete charge-to-full cycle and subsequent unplug/discharge transition were
+observed on the development laptop in normal use. Charging progressed from 23%
+at about 12.5 W to full in 2h42m; live power remained plausible, the ETA adapted,
+and forecast space shortened as measured history accumulated. At full, the
+display changed to 100% and 0.0 W, removed the arrow and forecast, and froze
+`2h42m` above `charge … full`. Restarting the viewer while still full and
+connected reconstructed the same persisted duration without `n/a` or replacing
+the recorded completion time with wall-clock time.
+
+After unplugging, the arrow and target changed immediately to discharging and
+`empty`; the incompatible charging ETA was suppressed as `--`. The persisted
+discharge session then began near `0h00m`. Before its ETA was ready, the live
+counter-delta fallback independently produced approximate power around
+12.6–12.8 W; later, a compatible persisted ETA of about 2h59m and its discharge
+forecast appeared. This validates the intended separation of live power,
+minute-level history/ETA, transition presentation, and completed-charge
+reconstruction on this hardware only; it is not a broader compatibility claim.
 
 ---
 
