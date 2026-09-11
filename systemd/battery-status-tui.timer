@@ -2,7 +2,7 @@
 Description=Record battery status every minute
 
 [Timer]
-OnBootSec=1min
+OnActiveSec=10s
 OnUnitActiveSec=1min
 AccuracySec=10s
 Persistent=true

@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format is loosely
 based on [Keep a Changelog](https://keepachangelog.com/). This project follows
 [Semantic Versioning](https://semver.org/).
 
+## 1.1.1 — 2026-09-11
+
+### Fixed
+
+- The collector timer now schedules its first run relative to its own
+  activation (`OnActiveSec=10s`) instead of system boot (`OnBootSec`). A
+  late-starting user systemd manager could bring the timer up after the old
+  boot-relative deadline had already passed, leaving it permanently
+  `active (elapsed)` with `Trigger: n/a` and no samples recorded, since the
+  steady-state `OnUnitActiveSec` cadence also had no prior activation to
+  schedule from. The 1-minute steady-state interval is unchanged.
+
 ## 1.1.0 — 2026-09-08
 
 ### Changed
