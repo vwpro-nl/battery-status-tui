@@ -15,6 +15,9 @@ from .power import MAX_DELTA_SECONDS, PowerResolver, is_sysfs_direct_method
 from .sources import SourceUnavailable, SysfsObservation, SysfsSource, aggregate
 
 DEFAULT_SAMPLE_INTERVAL_SECONDS = 1.0
+DEFAULT_SAMPLE_HZ = 1.0
+MIN_SAMPLE_HZ = 0.05
+MAX_SAMPLE_HZ = 10.0
 SAMPLE_PERIOD_SECONDS = DEFAULT_SAMPLE_INTERVAL_SECONDS
 RAW_RETENTION_SECONDS = 30.0
 RAW_RETENTION_MAX_SAMPLES = 4096
@@ -80,9 +83,13 @@ class LiveSampler:
                  wall_clock: Callable[[], float] = time.time) -> None:
         if not math.isfinite(interval) or interval <= 0:
             raise ValueError("live sample interval must be positive and finite")
+        period_ns = round(interval * 1_000_000_000)
+        if period_ns <= 0:
+            raise ValueError("live sample interval is too small")
         self.source = source or SysfsSource()
         self.resolver = resolver or PowerResolver()
         self.interval = interval
+        self.period_ns = period_ns
         self.clock = clock
         self.wall_clock = wall_clock
         self._raw_samples: deque[tuple[float, Measurement]] = deque(
@@ -95,6 +102,7 @@ class LiveSampler:
         self._power_observation_at: float | None = None
         self._power_samples: deque[_PowerSample] = deque()
         self._next_sample_at: float | None = None
+        self._next_sample_at_ns: int | None = None
         self._last_poll_at: float | None = None
         self._previous_raw: Measurement | None = None
         self._last_mode: LiveOperatingMode | None = None
@@ -127,12 +135,14 @@ class LiveSampler:
     def poll(self) -> LiveReading | None:
         """Read at most once when due, advancing from the prior deadline."""
         now = self.clock()
-        if self._next_sample_at is None:
-            self._next_sample_at = now
-        if now < self._next_sample_at:
+        now_ns = round(now * 1_000_000_000)
+        if self._next_sample_at_ns is None:
+            self._next_sample_at_ns = now_ns
+        if now_ns < self._next_sample_at_ns:
             return None
-        missed = math.floor((now - self._next_sample_at) / self.interval)
-        self._next_sample_at += (missed + 1) * self.interval
+        missed = (now_ns - self._next_sample_at_ns) // self.period_ns
+        self._next_sample_at_ns += (missed + 1) * self.period_ns
+        self._next_sample_at = self._next_sample_at_ns / 1_000_000_000
         scheduler_gap = None if self._last_poll_at is None else now - self._last_poll_at
         self._last_poll_at = now
         try:

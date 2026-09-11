@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from battery_status_tui.live import (
     DEFAULT_SAMPLE_INTERVAL_SECONDS, DISPLAY_EWMA_ALPHA, LiveOperatingMode,
-    LiveSampler, classify_live_mode,
+    LiveSampler, RAW_RETENTION_MAX_SAMPLES, classify_live_mode,
 )
 from battery_status_tui.models import PowerReading, RawBatterySnapshot
 from battery_status_tui.power import is_sysfs_direct_method
@@ -86,6 +86,28 @@ class LiveSamplerTests(unittest.TestCase):
         self.assertIsNotNone(sampler.poll())
         self.assertEqual((source.calls, sampler.next_sample_at), (3, 1004))
 
+    def test_common_rate_periods_use_integer_nanoseconds(self):
+        for hz, expected in ((.1, 10_000_000_000), (.5, 2_000_000_000),
+                             (1, 1_000_000_000), (2, 500_000_000), (5, 200_000_000)):
+            sampler, _, _ = self.sampler([raw(1000)], interval=1 / hz)
+            self.assertEqual(sampler.period_ns, expected)
+
+    def test_missed_deadline_reads_once_without_catch_up(self):
+        sampler, source, clock = self.sampler([raw(1000)], interval=.2)
+        self.assertIsNotNone(sampler.poll())
+        clock.advance(4.11)
+        self.assertIsNotNone(sampler.poll())
+        self.assertIsNone(sampler.poll())
+        self.assertEqual(source.calls, 2)
+
+    def test_new_sampler_has_fresh_start_deadline(self):
+        sampler, source, clock = self.sampler([raw(1000)], interval=.5)
+        self.assertIsNotNone(sampler.poll())
+        clock.advance(.2)
+        restarted = LiveSampler(source, interval=.5, clock=clock, wall_clock=clock)
+        self.assertIsNotNone(restarted.poll())
+        self.assertAlmostEqual(restarted.next_sample_at, clock.value + .5)
+
     def test_long_stall_reads_once_and_resets_old_display(self):
         sampler, source, clock = self.sampler([raw(1000, watts=12), raw(1004, watts=None)])
         self.take(sampler, clock)
@@ -105,6 +127,12 @@ class LiveSamplerTests(unittest.TestCase):
         clock.advance(31)
         self.assertIsNotNone(sampler.poll())
         self.assertEqual(len(sampler.raw_samples), 1)
+
+    def test_raw_retention_cap_remains_bounded(self):
+        sampler, _, clock = self.sampler([raw(1000)], interval=.001)
+        for _ in range(RAW_RETENTION_MAX_SAMPLES + 20):
+            self.take(sampler, clock, .001)
+        self.assertEqual(len(sampler.raw_samples), RAW_RETENTION_MAX_SAMPLES)
 
     def test_four_second_timestamp_median_and_elapsed_ewma(self):
         values = [raw(1000 + i, watts=w) for i, w in enumerate((10, 20, 30, 40, 50, 60))]

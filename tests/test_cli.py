@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+from contextlib import redirect_stdout
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,6 +17,27 @@ from battery_status_tui.storage import Storage
 
 
 class CliTests(unittest.TestCase):
+    def test_live_sample_rate_default_and_validation(self):
+        self.assertEqual(parser().parse_args([]).live_sample_hz, 1.0)
+        for value in ("0.1", "0.5", "1", "2", "5"):
+            self.assertEqual(parser().parse_args(["--live-sample-hz", value]).live_sample_hz,
+                             float(value))
+        for value in ("0", "nan", "11"):
+            with self.assertRaises(SystemExit):
+                parser().parse_args(["--live-sample-hz", value])
+
+    def test_benchmark_does_not_create_history_database(self):
+        from battery_status_tui import cli
+        from battery_status_tui.benchmark import analyze
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "must-not-exist.sqlite3"
+            report = analyze((), (1, 5), 5)
+            with patch("battery_status_tui.cli.run_benchmark", return_value=report), \
+                    redirect_stdout(io.StringIO()):
+                self.assertEqual(cli.main(["--benchmark-live", "--database", str(path)]), 0)
+            self.assertFalse(path.exists())
+
     def test_live_refresh_wakes_at_next_projection_boundary(self):
         self.assertAlmostEqual(next_refresh_delay(60, 1200 - 2), 2.05)
         self.assertEqual(next_refresh_delay(60, 1200 + 2), 60)

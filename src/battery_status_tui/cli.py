@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import math
 import signal
 import sqlite3
 import sys
@@ -12,6 +13,7 @@ from contextlib import closing
 from pathlib import Path
 
 from . import __version__
+from .benchmark import format_report, run_benchmark
 from .estimate import estimate_remaining, smooth_seconds
 from .footer import frame_with_margins, parked_cursor
 from .graph import (
@@ -20,7 +22,9 @@ from .graph import (
 )
 from .models import Estimate, Measurement, Session
 from .models import SleepInterval
-from .live import LiveReading, LiveSampler
+from .live import (
+    DEFAULT_SAMPLE_HZ, MAX_SAMPLE_HZ, MIN_SAMPLE_HZ, LiveReading, LiveSampler,
+)
 from .schema import V1_SCHEMA_VERSION
 from .sources import BatterySource, SourceUnavailable, aggregate
 from .storage import Storage, default_database_path
@@ -43,6 +47,27 @@ PROFILE: P
 AXIS   : ┬─────┬─────┬─────┬─────┬"""
 
 DISPLAY_HEARTBEAT = 1.0
+
+
+def sample_hz(value: str) -> float:
+    try:
+        rate = float(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("sample rate must be a number in Hz") from error
+    if not math.isfinite(rate) or not MIN_SAMPLE_HZ <= rate <= MAX_SAMPLE_HZ:
+        raise argparse.ArgumentTypeError(
+            f"sample rate must be between {MIN_SAMPLE_HZ:g} and {MAX_SAMPLE_HZ:g} Hz")
+    return rate
+
+
+def sample_rates(value: str) -> tuple[float, ...]:
+    try:
+        rates = tuple(sample_hz(item.strip()) for item in value.split(","))
+    except argparse.ArgumentTypeError:
+        raise
+    if not rates:
+        raise argparse.ArgumentTypeError("at least one sample rate is required")
+    return rates
 
 
 def next_refresh_delay(interval: float, wall_now: float) -> float:
@@ -187,6 +212,8 @@ def parser() -> argparse.ArgumentParser:
     mode.add_argument("--sample", action="store_true", help="record one sample without rendering")
     mode.add_argument("--diagnose", action="store_true", help="show source and battery-health details")
     mode.add_argument("--unicode-probe", action="store_true", help="show solid and Braille glyph candidates")
+    mode.add_argument("--benchmark-live", action="store_true",
+                      help="benchmark live sampling in memory without writing history")
     result.add_argument("--interval", type=float, default=60, help="interactive refresh interval")
     result.add_argument("--database", type=Path, default=default_database_path(), help="SQLite history path")
     result.add_argument("--power-decimals", type=int, default=1,
@@ -197,6 +224,15 @@ def parser() -> argparse.ArgumentParser:
                         help="append weighted live power for diagnostics")
     result.add_argument("--weighted-power-samples", type=int, default=5,
                         help="weighted live observation count (default: 5)")
+    result.add_argument("--live-sample-hz", type=sample_hz, default=DEFAULT_SAMPLE_HZ,
+                        help="interactive live sampling rate in Hz (default: 1)")
+    result.add_argument("--benchmark-reference-hz", type=sample_hz, default=5.0,
+                        help="benchmark reference sampling rate in Hz (default: 5)")
+    result.add_argument("--benchmark-rates", type=sample_rates,
+                        default=(0.1, 0.5, 1.0, 2.0, 5.0),
+                        help="comma-separated benchmark comparison rates in Hz")
+    result.add_argument("--benchmark-duration", type=float, default=90.0,
+                        help="benchmark wall-clock duration in seconds (default: 90)")
     result.add_argument("--version", action="version", version=__version__)
     return result
 
@@ -271,6 +307,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     if args.unicode_probe:
         print(UNICODE_PROBE)
+        return 0
+    if args.benchmark_live:
+        if not math.isfinite(args.benchmark_duration) or args.benchmark_duration <= 0:
+            parser().error("--benchmark-duration must be positive and finite")
+        if max(args.benchmark_rates) > args.benchmark_reference_hz:
+            parser().error("--benchmark-rates cannot exceed --benchmark-reference-hz")
+        report = run_benchmark(args.benchmark_reference_hz, args.benchmark_duration,
+                               args.benchmark_rates)
+        print(format_report(report))
         return 0
 
     version = _on_disk_schema_version(args.database)
@@ -365,7 +410,7 @@ def _run_v4(args: argparse.Namespace) -> int:
     sys.stdout.write(CSI + "?25l")
     view = None
     body_error: str | None = None
-    live_sampler = LiveSampler()
+    live_sampler = LiveSampler(interval=1.0 / args.live_sample_hz)
     if args.power_decimals < 0:
         parser().error("--power-decimals must be non-negative")
     if args.weighted_power_samples <= 0:

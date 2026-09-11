@@ -140,6 +140,11 @@ Nothing is installed or enabled automatically.
 | `--show-persisted-power` | Diagnostic: prepend minute-level persisted power to the live title power. |
 | `--show-weighted-power` | Diagnostic: append a weighted live-power value to the live title power. |
 | `--weighted-power-samples N` | Set the diagnostic weighted-power window (default `5`). |
+| `--live-sample-hz HZ` | Set interactive live sampling in Hz (default `1`; range `0.05`–`10`). This does not change viewer refresh cadence. |
+| `--benchmark-live` | Run an in-memory live-sampling benchmark; does not read or write history. |
+| `--benchmark-reference-hz HZ` | Set benchmark reference rate (default `5`). |
+| `--benchmark-rates HZ,...` | Set time-downsampled comparison rates (default `0.1,0.5,1,2,5`). |
+| `--benchmark-duration SECONDS` | Set benchmark duration (default `90`). |
 | `--diagnose` | Inspect live sources and print power, health, session, identity, and database details without collecting or modifying the history database. |
 | `--unicode-probe` | Print the block/Braille/profile/axis glyphs the renderer uses, to verify terminal font support. |
 | `--version` | Print the version and exit. |
@@ -150,6 +155,41 @@ exclusive.
 The normal interactive title contains only current live power. Persisted and
 weighted values appear only when their diagnostic options are explicitly set;
 these live diagnostic options do not change collection or stored history.
+
+### Choosing a live sampling rate
+
+The normal viewer samples live sysfs data at 1 Hz. Override that independently
+of the persisted-data refresh and one-second display heartbeat:
+
+```bash
+battery-status-tui                       # 1 Hz default
+battery-status-tui --live-sample-hz 0.5 # every 2 seconds
+battery-status-tui --live-sample-hz 2   # every 0.5 seconds
+```
+
+To assess a laptop, take one 5 Hz reference run and derive every slower series
+from that same in-memory dataset:
+
+```bash
+battery-status-tui --benchmark-live
+battery-status-tui --benchmark-live --benchmark-duration 60 \
+  --benchmark-reference-hz 5 --benchmark-rates 0.1,0.5,1,2,5
+```
+
+Downsampling chooses the latest real observation at or before each elapsed-time
+boundary, so scheduling jitter and missed deadlines are respected. The report
+includes sample count, valid-power coverage, changes of at least 0.5 W, battery
+mode transitions, mean and population standard deviation, mean absolute error
+against the reference, missed changes, and process CPU time per wall-clock
+second. If live power is unavailable, power statistics and the recommendation
+are reported as unavailable rather than inferred.
+
+The recommendation is the lowest tested rate with at least three samples,
+nearly the same valid-power coverage, all observed mode transitions, mean
+absolute error no greater than the larger of 0.25 W or 10% of reference spread,
+and no more than the larger of one or 5% of reference power changes missed.
+Apply an accepted result explicitly with `--live-sample-hz`; the benchmark never
+changes configuration or persistent history.
 
 ## Reading the graph
 
