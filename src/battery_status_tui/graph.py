@@ -44,6 +44,66 @@ BATTERY_COLOR_STOPS = (
     (100.0, (20, 105, 50)),
 )
 
+
+# --- shared dashboard colours ------------------------------------------------
+# ~/.config/monitor-dashboard/colors.conf (from ~/projects/monitor) holds the
+# colours shared by the dashboard panes: key=#rrggbb or key=<0-255>. Missing
+# file or key: the built-in values above stay. MONITOR_DASHBOARD_COLORS can
+# point elsewhere ("" switches the file off, as the tests do).
+def _shared_colors() -> dict:
+    import os
+    import re
+    path = os.environ.get("MONITOR_DASHBOARD_COLORS")
+    if path is None:
+        base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+        path = os.path.join(base, "monitor-dashboard", "colors.conf")
+    if not path:
+        return {}
+    out = {}
+    try:
+        with open(path, encoding="utf-8") as stream:
+            for line in stream:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                value = (value.split() or [""])[0]
+                if re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+                    out[key.strip().lower()] = tuple(int(value[i:i + 2], 16) for i in (1, 3, 5))
+                elif re.fullmatch(r"\d{1,3}", value) and int(value) < 256:
+                    out[key.strip().lower()] = int(value)
+    except OSError:
+        return {}
+    return out
+
+
+def _sgr(value, layer: str = "38") -> str:
+    if isinstance(value, int):
+        return f"{layer};5;{value}"
+    return f"{layer};2;{value[0]};{value[1]};{value[2]}"
+
+
+_SHARED = _shared_colors()
+if "title" in _SHARED:
+    CYAN = CSI + _sgr(_SHARED["title"]) + "m"
+if "muted" in _SHARED:
+    MUTED = CSI + _sgr(_SHARED["muted"]) + "m"
+# The gradient stops at 25, 50 and 100 % are the shared down, pending and ok.
+# A palette index has no RGB here; only #rrggbb values replace a stop.
+_STOP_KEYS = {25.0: "down", 50.0: "pending", 100.0: "ok"}
+
+
+def _shared_stops(stops, shared: dict):
+    return tuple(
+        (value, shared[_STOP_KEYS[value]])
+        if value in _STOP_KEYS and isinstance(shared.get(_STOP_KEYS[value]), tuple)
+        else (value, rgb)
+        for value, rgb in stops
+    )
+
+
+BATTERY_COLOR_STOPS = _shared_stops(BATTERY_COLOR_STOPS, _SHARED)
+
 TIME_COLUMNS = 47
 COLUMN_SECONDS = 20 * 60
 GRAPH_WIDTH = TIME_COLUMNS + 1
